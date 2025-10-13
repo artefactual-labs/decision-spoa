@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.dylib
+*.so
+*.test
+*.out
+*.prof
+*.pprof
+
+# Coverage reports
+*.cover
+*.coverprofile
+coverage.out
+.gocache/
+
+# Logs
+*.log
+
+# Generated files
+*.pb.go
+
+# IDE/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
