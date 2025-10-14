@@ -18,7 +18,7 @@ Both binaries expose `-h` for full flag usage. Every flag also has an equivalent
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - MaxMind GeoLite2 City and ASN databases (optional but recommended)
 - HAProxy 2.0+ with SPOE support
 
@@ -158,7 +158,7 @@ rules:
 - All match lists are OR-ed. `host` entries default to exact matches unless you include regex tokens (`^`, `*`, `[]`, etc.); `path`, `xff`, `user_agent`, `query`, `sni`, and `ja3` entries are compiled as Go regular expressions.
 - `method` comparisons are case-insensitive exact matches (e.g., `GET`, `POST`).
 - `sni` and `ja3` clauses are optional—include them only if your HAProxy build exports those fields via SPOE.
-- JA3/JA4 fingerprints require HAProxy 2.9+ (or an external TLS terminator that forwards the hash). Older community builds cannot expose the client hello to SPOE, so leave those matchers out when running ≤2.8.
+- JA3 fingerprints require HAProxy 2.5+ (community builds added `ssl_fc_ja3_hash` in that release). JA4 still needs 2.9+ or an external TLS terminator that forwards the hash. Builds ≤2.4 cannot expose the client hello to SPOE, so leave those matchers out there.
 - `country` expects ISO alpha-2 codes. `asn` takes unsigned integers. `cidr` supports IPv4/IPv6 ranges in CIDR notation.
 - Scope filters (`frontends`, `backends`, `protocols`) constrain where the rule can run. Omit the field to allow every value. Protocol names are lower-cased strings; `http` is assumed if none are supplied.
 - `return` is an arbitrary key/value map. Nothing is reserved—emit whichever variables you intend to consume in HAProxy (e.g., `policy.bucket`, `policy.challenge`, custom flags), and gate behaviour there with `var()` checks.
