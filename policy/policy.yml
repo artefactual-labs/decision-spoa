@@ -1,0 +1,11 @@
+# Example policy shipped with the package. Adjust to fit your deployment and
+# restart decision-spoa once done.
+
+defaults:
+  global:
+    use_varnish: true
+    use_coraza: true
+    use_challenge: true
+    rate: default  # valid values: default,bot,high,deny
+trusted_proxy:
+  global: []

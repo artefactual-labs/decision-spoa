@@ -42,8 +42,8 @@ env GOTOOLCHAIN=local go build -trimpath -o build/decision-configcheck ./cmd/dec
 
 ```bash
 ./build/decision-spoa \
-  --listen 127.0.0.1:9107 \
-  --metrics 0.0.0.0:9907 \
+  --listen 127.0.0.1:9908 \
+  --metrics 127.0.0.1:9907 \
   --root /etc/decision-policy \
   --city-db /var/lib/GeoIP/GeoLite2-City.mmdb \
   --asn-db /var/lib/GeoIP/GeoLite2-ASN.mmdb
@@ -51,11 +51,13 @@ env GOTOOLCHAIN=local go build -trimpath -o build/decision-configcheck ./cmd/dec
 
 Append `--check-config` to validate the policy directory and exit without starting the service.
 
+The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses `/etc/default/decision-spoa` to pass CLI options. The stock configuration listens on `127.0.0.1:9908`, exposes metrics on `127.0.0.1:9907`, and enables best-effort GeoIP downloads plus the `metrics-host-label` toggle.
+
 ### Flags and environment variables
 
 | Flag | Env var | Default | Notes |
 | --- | --- | --- | --- |
-| `--listen` | `DECISION_LISTEN` | `127.0.0.1:9107` | TCP address HAProxy connects to. |
+| `--listen` | `DECISION_LISTEN` | `127.0.0.1:9107` | TCP address HAProxy connects to (packages override to `127.0.0.1:9908`). |
 | `--metrics` | `DECISION_METRICS` | `127.0.0.1:9907` | Prometheus HTTP endpoint (`/metrics`). |
 | `--root` | `DECISION_ROOT` | `/etc/decision-policy` | Directory containing policy config files. |
 | `--debug` | `DECISION_DEBUG` | disabled | Enables verbose policy logs. |
@@ -67,6 +69,43 @@ Append `--check-config` to validate the policy directory and exit without starti
 | `--best-effort` | n/a | `true` | Ignore GeoIP download errors when set. |
 
 Send `SIGHUP` to the running process to reload the policy configuration and reopen the GeoIP databases without interrupting HAProxy connections.
+
+## Packaging
+
+We use GoReleaser + NFPM to ship `.deb`/`.rpm` artifacts. Installing the package provides:
+
+- `decision-spoa.service` and its companion default file at `/etc/default/decision-spoa`.
+- `decision-geoip-db-updates.service` plus the daily `decision-geoip-db-updates.timer` and `/etc/default/decision-geoip-db-updates`.
+- A sample HAProxy SPOE config at `/etc/haproxy/decision-spoa.cfg`.
+- A starter policy at `/etc/decision-policy/policy.yml`.
+
+The post-install hook ensures `/var/lib/decision` and `/etc/decision-policy` exist and are owned by the `haproxy` account, labels TCP ports 9907/9908 as `http_port_t` under SELinux, reloads systemd, and enables both the main service and the GeoIP timer. The package depends on `haproxy` being present so the service account/group already exist.
+
+Editing the default files is the supported way to change runtime flags. The shipped values look like this:
+
+```sh
+# /etc/default/decision-spoa
+DECISION_SPOA_OPTS="\
+  --listen 127.0.0.1:9908 \
+  --metrics 127.0.0.1:9907 \
+  --root /etc/decision-policy \
+  --city-db /var/lib/decision/GeoLite2-City.mmdb \
+  --asn-db /var/lib/decision/GeoLite2-ASN.mmdb \
+  --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
+  --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
+  --best-effort \
+  --metrics-host-label"
+
+# /etc/default/decision-geoip-db-updates
+DECISION_GEOIP_DB_UPDATES_OPTS="\
+  --city-out /var/lib/decision/GeoLite2-City.mmdb \
+  --asn-out /var/lib/decision/GeoLite2-ASN.mmdb \
+  --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
+  --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
+  --best-effort"
+```
+
+After editing either file, run `systemctl restart decision-spoa` or trigger the updater manually with `systemctl start decision-geoip-db-updates.service`.
 
 ### HAProxy integration
 

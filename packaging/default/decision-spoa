@@ -1,0 +1,13 @@
+# Runtime options for decision-spoa. Edit values and restart the systemd unit
+# to apply changes. Example: DECISION_SPOA_OPTS="--listen 0.0.0.0:9908 ..."
+
+DECISION_SPOA_OPTS="\
+  --listen 127.0.0.1:9908 \
+  --metrics 127.0.0.1:9907 \
+  --root /etc/decision-policy \
+  --city-db /var/lib/decision/GeoLite2-City.mmdb \
+  --asn-db /var/lib/decision/GeoLite2-ASN.mmdb \
+  --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
+  --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
+  --best-effort \
+  --metrics-host-label"

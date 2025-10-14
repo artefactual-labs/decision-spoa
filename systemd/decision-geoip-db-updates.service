@@ -1,0 +1,25 @@
+[Unit]
+Description=Decision GeoIP Database Updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Load CLI options from /etc/default/decision-geoip-db-updates if present.
+EnvironmentFile=-/etc/default/decision-geoip-db-updates
+Type=oneshot
+ExecStart=/usr/local/bin/decision-geoip-db-updates $DECISION_GEOIP_DB_UPDATES_OPTS
+
+User=haproxy
+Group=haproxy
+WorkingDirectory=/var/lib/decision
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes

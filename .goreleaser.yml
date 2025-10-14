@@ -1,0 +1,112 @@
+version: 2
+project_name: decision-spoa
+
+release:
+  github:
+    owner: artefactual-labs
+    name: decision-spoa
+
+builds:
+  - id: decision-spoa
+    main: ./cmd/decision-spoa
+    binary: decision-spoa
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: decision-geoip-db-updates
+    main: ./cmd/decision-geoip-db-updates
+    binary: decision-geoip-db-updates
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: decision-configcheck
+    main: ./cmd/decision-configcheck
+    binary: decision-configcheck
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  abbrev: 8
+
+nfpms:
+  - id: default
+    package_name: decision-spoa
+    formats: [deb, rpm]
+    vendor: Artefactual Systems Inc.
+    homepage: https://github.com/artefactual-labs/decision-spoa
+    maintainer: Artefactual Systems Inc. <info@artefactual.com>
+    description: HAProxy decision engine and GeoIP updater for Artefactual deployments.
+    license: Apache-2.0
+    bindir: /usr/local/bin
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    builds:
+      - decision-spoa
+      - decision-geoip-db-updates
+      - decision-configcheck
+    contents:
+      - src: systemd/decision-spoa.service
+        dst: /etc/systemd/system/decision-spoa.service
+        type: config
+      - src: systemd/decision-geoip-db-updates.service
+        dst: /etc/systemd/system/decision-geoip-db-updates.service
+        type: config
+      - src: systemd/decision-geoip-db-updates.timer
+        dst: /etc/systemd/system/decision-geoip-db-updates.timer
+        type: config
+      - src: packaging/default/decision-spoa
+        dst: /etc/default/decision-spoa
+        type: config
+      - src: packaging/default/decision-geoip-db-updates
+        dst: /etc/default/decision-geoip-db-updates
+        type: config
+      - src: haproxy/decision-spoa.cfg
+        dst: /etc/haproxy/decision-spoa.cfg
+        type: config
+      - src: policy/policy.yml
+        dst: /etc/decision-policy/policy.yml
+        type: config
+    dependencies:
+      - haproxy
+    scripts:
+      postinstall: packaging/nfpm/postinstall.sh
+      preremove: packaging/nfpm/preremove.sh
+      postremove: packaging/nfpm/postremove.sh

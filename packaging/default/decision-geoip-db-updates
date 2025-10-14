@@ -1,0 +1,9 @@
+# Runtime options for the GeoIP database updater. Override as required and
+# either restart decision-geoip-db-updates.timer or start the service manually.
+
+DECISION_GEOIP_DB_UPDATES_OPTS="\
+  --city-out /var/lib/decision/GeoLite2-City.mmdb \
+  --asn-out /var/lib/decision/GeoLite2-ASN.mmdb \
+  --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
+  --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
+  --best-effort"

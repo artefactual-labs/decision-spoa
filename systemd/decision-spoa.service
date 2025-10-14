@@ -1,0 +1,36 @@
+[Unit]
+Description=Decision SPOA (HAProxy decision engine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Load runtime options from /etc/default/decision-spoa if present.
+EnvironmentFile=-/etc/default/decision-spoa
+Type=simple
+ExecStart=/usr/local/bin/decision-spoa $DECISION_SPOA_OPTS
+
+User=haproxy
+Group=haproxy
+WorkingDirectory=/var/lib/decision
+RuntimeDirectory=decision
+LogsDirectory=decision
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+Restart=on-failure
+RestartSec=2s
+Environment=GOTRACEBACK=crash
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+[Install]
+WantedBy=multi-user.target

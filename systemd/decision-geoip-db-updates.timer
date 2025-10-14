@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Decision GeoIP database update daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=decision-geoip-db-updates.service
+
+[Install]
+WantedBy=timers.target
