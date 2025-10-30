@@ -60,7 +60,7 @@ The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses
 | `--listen` | `DECISION_LISTEN` | `127.0.0.1:9107` | TCP address HAProxy connects to (packages override to `127.0.0.1:9908`). |
 | `--metrics` | `DECISION_METRICS` | `127.0.0.1:9907` | Prometheus HTTP endpoint (`/metrics`). |
 | `--root` | `DECISION_ROOT` | `/etc/decision-policy` | Directory containing policy config files. |
-| `--debug` | `DECISION_DEBUG` | disabled | Enables verbose policy logs. |
+| `--debug` | `DECISION_DEBUG` | disabled | Enables verbose policy logs (see below). |
 | `--metrics-host-label` | `DECISION_METRICS_HOST_LABEL` | disabled | Adds the `host` label to metrics (higher cardinality). |
 | `--city-db` | `GEOIP_CITY_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | Path to City database. Optional but enables country lookups. |
 | `--asn-db` | `GEOIP_ASN_DB` | `/var/lib/GeoIP/GeoLite2-ASN.mmdb` | Path to ASN database. |
@@ -69,6 +69,17 @@ The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses
 | `--best-effort` | n/a | `true` | Ignore GeoIP download errors when set. |
 
 Send `SIGHUP` to the running process to reload the policy configuration and reopen the GeoIP databases without interrupting HAProxy connections.
+
+#### Debug logging
+
+When `--debug` (or `DECISION_DEBUG`) is enabled the daemon prints an expanded policy line for every SPOE transaction. The log now includes:
+
+- `raw_input`: every key/value HAProxy delivered via SPOE, sorted for readability.
+- `src`, `xff`, and `ip`: the TCP peer, the header presented by HAProxy, and the client IP selected after trusted-proxy processing.
+- `xff_used`, `xff_stripped`, and `trusted_peer`: whether the XFF header was honoured, how many trusted hops were removed, and if the immediate peer matches the configured `trusted_proxy` list.
+- `trusted_entries`: the combined trusted entries (global + frontend + backend) active for the request.
+
+These extras make it easy to confirm that trusted proxy configuration is in effect and to troubleshoot spoofed headers or misconfigured upstreams.
 
 ## Packaging
 
