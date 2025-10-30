@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -229,7 +230,7 @@ func main() {
 	s := &spoe.Server{
 		Addr:   *listen,
 		Logger: log.Default(),
-		Handler: func(args map[string]string) (map[string]interface{}, error) {
+		Handler: func(args map[string]string, raw map[string]string) (map[string]interface{}, error) {
 			start := time.Now()
 
 			state.RLock()
@@ -329,8 +330,8 @@ func main() {
 				}
 			}
 			if cfgSnapshot.Debug {
-				log.Printf("policy: fe=%s be=%s ip=%v xff_stripped=%d asn=%d c=%s method=%s host=%s path=%s query=%q sni=%s ja3=%s ua=%q vars=%v",
-					frontend, normBE, ip, strippedHops, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
+				log.Printf("policy: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_stripped=%d asn=%d c=%s method=%s host=%s path=%s query=%q sni=%s ja3=%s ua=%q vars=%v",
+					sortedRaw(raw), frontend, normBE, src, xff, ip, strippedHops, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
 			}
 			return resp, nil
 		},
@@ -401,4 +402,17 @@ func normalizeValue(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+func sortedRaw(raw map[string]string) []string {
+	out := make([]string, 0, len(raw))
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("%s=%s", k, raw[k]))
+	}
+	return out
 }

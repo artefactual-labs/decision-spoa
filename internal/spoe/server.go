@@ -1,6 +1,7 @@
 package spoe
 
 import (
+	"fmt"
 	"log"
 	"net"
 
@@ -15,10 +16,11 @@ import (
 type Server struct {
 	Addr   string
 	Logger *log.Logger
-	// Handler receives args extracted from SPOE messages and must return the vars to set.
+	// Handler receives args extracted from SPOE messages, along with the raw key/value inputs (as strings),
+	// and must return the vars to set.
 	// Expected keys in resp:
 	//   - Arbitrary SPOE variables (e.g. "policy.use_varnish", "use_varnish", ...)
-	Handler func(args map[string]string) (map[string]interface{}, error)
+	Handler func(args map[string]string, raw map[string]string) (map[string]interface{}, error)
 }
 
 func (s *Server) ListenAndServe() error {
@@ -31,9 +33,9 @@ func (s *Server) ListenAndServe() error {
 	spLog := logger.NewDefaultLog()
 
 	h := func(req *request.Request) {
-		args := collectArgs(req.Messages)
+		args, raw := collectArgs(req.Messages)
 
-		resp, err := s.Handler(args)
+		resp, err := s.Handler(args, raw)
 		if err != nil {
 			// best-effort: do not set any vars on error
 			return
@@ -56,10 +58,10 @@ func (s *Server) ListenAndServe() error {
 	return a.Serve(l)
 }
 
-// collectArgs pulls only the keys we care about from the SPOE messages.
-// negasus v1.0.7's KV doesn't expose Keys(), so we fetch known keys via Get().
-func collectArgs(msgs *message.Messages) map[string]string {
+// collectArgs returns both the subset of keys used by the policy engine and a raw view of all inputs.
+func collectArgs(msgs *message.Messages) (map[string]string, map[string]string) {
 	out := make(map[string]string)
+	raw := make(map[string]string)
 
 	want := []string{
 		"src",
@@ -81,23 +83,34 @@ func collectArgs(msgs *message.Messages) map[string]string {
 		if err != nil || m == nil || m.KV == nil {
 			continue
 		}
+		items := m.KV.Data()
+		for _, item := range items {
+			if _, already := raw[item.Name]; already {
+				continue
+			}
+			raw[item.Name] = stringify(item.Value)
+		}
 		for _, k := range want {
 			if _, already := out[k]; already {
 				continue
 			}
-			if v, ok := m.KV.Get(k); ok {
-				switch t := v.(type) {
-				case string:
-					out[k] = t
-				case []byte:
-					out[k] = string(t)
-				case net.IP:
-					out[k] = t.String()
-				default:
-					// ignore unrecognized types; we only expect strings/bytes/IP
-				}
+			if v, ok := raw[k]; ok {
+				out[k] = v
 			}
 		}
 	}
-	return out
+	return out, raw
+}
+
+func stringify(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []byte:
+		return string(t)
+	case net.IP:
+		return t.String()
+	default:
+		return fmt.Sprint(v)
+	}
 }
