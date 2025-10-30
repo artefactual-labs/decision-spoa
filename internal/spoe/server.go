@@ -103,6 +103,9 @@ func collectArgs(msgs *message.Messages) (map[string]string, map[string]string) 
 }
 
 func stringify(v interface{}) string {
+	if v == nil {
+		return ""
+	}
 	switch t := v.(type) {
 	case string:
 		return t

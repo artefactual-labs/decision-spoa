@@ -266,6 +266,15 @@ func main() {
 
 			trusted := cfgSnapshot.TrustedFor(backend, frontend)
 			ip, strippedHops := xforwarded.FromXFF(src, xff, trusted)
+			trustedEntries := trusted.Entries()
+			srcTrim := strings.TrimSpace(src)
+			xffUsed := false
+			if xff != "" && ip != nil {
+				if srcTrim == "" || ip.String() != srcTrim {
+					xffUsed = true
+				}
+			}
+			peerTrusted := trusted.Has(srcTrim)
 
 			var asn uint
 			var country string
@@ -330,8 +339,8 @@ func main() {
 				}
 			}
 			if cfgSnapshot.Debug {
-				log.Printf("policy: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_stripped=%d asn=%d c=%s method=%s host=%s path=%s query=%q sni=%s ja3=%s ua=%q vars=%v",
-					sortedRaw(raw), frontend, normBE, src, xff, ip, strippedHops, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
+				log.Printf("policy: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s method=%s host=%s path=%s query=%q sni=%s ja3=%s ua=%q vars=%v",
+					sortedRaw(raw), frontend, normBE, src, xff, ip, xffUsed, strippedHops, peerTrusted, trustedEntries, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
 			}
 			return resp, nil
 		},

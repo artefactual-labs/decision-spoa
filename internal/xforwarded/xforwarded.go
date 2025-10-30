@@ -118,6 +118,21 @@ func (t Trusted) containsIP(ip net.IP) bool {
 	return false
 }
 
+// Has reports whether the given literal IP/CIDR matches a trusted entry.
+func (t Trusted) Has(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if t.matchesLiteral(value) {
+		return true
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return t.containsIP(ip)
+	}
+	return false
+}
+
 // FromXFF returns the client IP taking into account src, XFF and trusted proxies.
 // The second return value is the number of trailing hops stripped from XFF.
 func FromXFF(src, xff string, trusted Trusted) (net.IP, int) {
