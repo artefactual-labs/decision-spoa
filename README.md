@@ -51,7 +51,7 @@ env GOTOOLCHAIN=local go build -trimpath -o build/decision-configcheck ./cmd/dec
 
 Append `--check-config` to validate the policy directory and exit without starting the service.
 
-The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses `/etc/default/decision-spoa` to pass CLI options. The stock configuration listens on `127.0.0.1:9908`, exposes metrics on `127.0.0.1:9907`, and enables best-effort GeoIP downloads. Optional high-cardinality metrics (`--metrics-host-label`, `--metrics-geoip`) remain disabled unless explicitly added to `DECISION_SPOA_OPTS`.
+The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses `/etc/default/decision-spoa` to pass CLI options. The stock configuration listens on `127.0.0.1:9908`, exposes metrics on `127.0.0.1:9907`, and enables best-effort GeoIP downloads. Optional high-cardinality metrics remain disabled unless you set `DECISION_METRICS_HOST_LABEL`/`DECISION_METRICS_GEOIP` in that file.
 
 ### Flags and environment variables
 
@@ -105,8 +105,12 @@ DECISION_SPOA_OPTS="\
   --asn-db /var/lib/decision/GeoLite2-ASN.mmdb \
   --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
   --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
-  --best-effort \
-  --metrics-host-label"
+  --best-effort"
+
+# Optional toggles; uncomment as needed.
+# DECISION_DEBUG=1
+# DECISION_METRICS_HOST_LABEL=1
+# DECISION_METRICS_GEOIP=1
 
 # /etc/default/decision-geoip-db-updates
 DECISION_GEOIP_DB_UPDATES_OPTS="\
