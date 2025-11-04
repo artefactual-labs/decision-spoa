@@ -204,6 +204,8 @@ rules:
       reason: default-policy
 ```
 
+The fallback entry acts as the safety net when no earlier rule matches. It should describe the baseline decision your HAProxy configuration expects (for example, setting a catch-all reason or toggling an audit flag). You may leave the `return` map empty if the defaults already cover everything; the agent still enforces an implicit `"default-policy"` reason. If you omit the fallback altogether, the compiler injects that implicit rule, so keeping one is optional. Retain it when you want to document the “otherwise” path explicitly or to perform conditional work such as setting a reason only for unmatched traffic while allowing earlier rules to keep their own values.
+
 ### Rule reference
 
 The table below lists every key supported inside a `rules:` entry. Unless stated otherwise, omit a field to leave it unconstrained.
@@ -236,6 +238,8 @@ The table below lists every key supported inside a `rules:` entry. Unless stated
 | `cidr` | list of CIDR strings | IPv4/IPv6 ranges checked against the client IP after trusted-proxy stripping. |
 
 Values placed under `return` are merged into the output in declaration order. Regular rules use “first writer wins”: once a variable is set by a matching rule it stays locked for the remainder of the evaluation. The fallback rule runs last with a “fill in the blanks” strategy, only populating keys that were never set earlier.
+
+**Reason string.** The special `reason` key controls the human-readable explanation returned to HAProxy and exported in the `decision_policy_decisions_total{reason=...}` metric. The first matching rule that sets `reason` keeps it locked; fallback only assigns a reason when none was provided earlier. If you omit the key entirely, the agent emits `"default-policy"` as the final reason.
 
 ### Defaults precedence
 
