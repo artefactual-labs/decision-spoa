@@ -204,6 +204,49 @@ rules:
       reason: default-policy
 ```
 
+### Rule reference
+
+The table below lists every key supported inside a `rules:` entry. Unless stated otherwise, omit a field to leave it unconstrained.
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `name` | string | empty | Optional identifier surfaced in logs/metrics. |
+| `protocols` | list of string | `["http"]` | Allowed protocols for the rule. Values are normalised to lowercase. Combine with `match.protocol` when you prefer to keep the protocol filter alongside other match clauses. |
+| `frontends` | list of string | any frontend | Limits evaluation to specific HAProxy frontends. |
+| `backends` | list of string | any backend | Limits evaluation to specific HAProxy backends. |
+| `match` | mapping | `{}` | Field predicates. See the table below for all available matchers. |
+| `return` | mapping (string → value) | required | Variables emitted back to HAProxy. Must contain at least one key. The key `reason` (case-insensitive) is treated specially as the policy reason string. |
+| `fallback` | boolean | `false` | Marks the rule as the fallback response. Exactly one rule in the file should set this to `true`. |
+
+`match` supports the following keys. Every slice is OR-ed; leave the list empty to skip that matcher.
+
+| Match key | Type | Notes |
+| --- | --- | --- |
+| `protocol` | list of string | Same semantics as top-level `protocols`; combined with that list. |
+| `host` | list of string | Exact matches when the value lacks regex tokens, or Go regular expressions otherwise. Host names are matched case-insensitively. |
+| `path` | list of regex | Go regular expressions evaluated against the HTTP path. |
+| `method` | list of string | Case-insensitive exact matches (e.g., `GET`, `POST`). |
+| `query` | list of regex | Go regular expressions matched against the raw query string. |
+| `xff` | list of regex | Regular expressions matched against the full `X-Forwarded-For` header received from HAProxy. |
+| `user_agent` | list of regex | Regular expressions evaluated against the `User-Agent` header. |
+| `sni` | list of regex | Regular expressions evaluated against the TLS SNI (requires HAProxy to forward `ssl_fc_sni`). |
+| `ja3` | list of regex | Regular expressions evaluated against the JA3 hash (requires `ssl_fc_ja3_hash`). |
+| `country` | list of string | ISO 3166-1 alpha-2 country codes compared against the GeoIP lookup result. |
+| `asn` | list of uint | ASN numbers compared against the GeoIP lookup result. |
+| `cidr` | list of CIDR strings | IPv4/IPv6 ranges checked against the client IP after trusted-proxy stripping. |
+
+Values placed under `return` are merged into the output in declaration order. Regular rules use “first writer wins”: once a variable is set by a matching rule it stays locked for the remainder of the evaluation. The fallback rule runs last with a “fill in the blanks” strategy, only populating keys that were never set earlier.
+
+### Defaults precedence
+
+The `defaults` section seeds every evaluation in three layers:
+
+- Start with `defaults.global`.
+- If the SPOE transaction came through a named frontend, merge `defaults.frontends[frontend]`.
+- Finally, merge `defaults.backends[backend]`.
+
+Because later merges overwrite earlier values, backend-specific defaults win over frontend defaults, and frontend defaults win over the global baseline. If you prefer the frontend settings to take precedence, leave the backend stanza empty or keep the frontend-specific logic inside explicit `rules` entries that run before backend-scoped rules.
+
 ### Match semantics
 
 - All match lists are OR-ed. `host` entries default to exact matches unless you include regex tokens (`^`, `*`, `[]`, etc.); `path`, `xff`, `user_agent`, `query`, `sni`, and `ja3` entries are compiled as Go regular expressions.
@@ -563,7 +606,7 @@ In HAProxy you can then gate behaviors with `var(policy.use_coraza) -m bool true
 - `frontends/<frontend-name>/` — only evaluated for requests routed through the named HAProxy frontend. Use this to loosen or tighten policies for a specific entry point (e.g., admin UI).
 - `backends/<backend-name>/` — highest precedence. Use for per-service exceptions (e.g., allow an API endpoint to bypass caches).
 
-Rules cascade according to scope precedence (**backend ➜ frontend ➜ default ➜ global default**). Within a scope, order matters: the first matching rule wins if `terminal: true` is set; otherwise subsequent rules can keep adjusting the bucket/challenge/varnish flags. When a scope has no files for a given engine, evaluation falls back to the next scope automatically.
+Rules cascade according to scope precedence (**backend ➜ frontend ➜ default ➜ global default**). Within a scope, evaluation is ordered and still honours the “first writer wins” behaviour: once a variable is set by an earlier match it stays locked for the rest of the evaluation. When a scope has no files for a given engine, evaluation falls back to the next scope automatically.
 
 Trusted proxy lists follow the same precedence: global entries are always applied, then frontend-specific entries (if the request came through that frontend), and finally backend-specific entries. The agent strips every matching trailing hop from `X-Forwarded-For` so rule matching always sees the true client IP.
 
