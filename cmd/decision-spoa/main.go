@@ -96,6 +96,7 @@ func main() {
 
 	// Host label toggle (avoid high cardinality in Grafana)
 	metricsHostLabel := flag.Bool("metrics-host-label", getenv("DECISION_METRICS_HOST_LABEL", "") != "", "Include 'host' label in Prom metrics")
+	metricsGeoip := flag.Bool("metrics-geoip", getenv("DECISION_METRICS_GEOIP", "") != "", "Include GeoIP metrics (country/ASN)")
 
 	// Geo & updater flags
 	cityDB := flag.String("city-db", getenv("GEOIP_CITY_DB", "/var/lib/GeoIP/GeoLite2-City.mmdb"), "City .mmdb path")
@@ -122,15 +123,20 @@ func main() {
 	}
 
 	// prometheus
-	prometheus.MustRegister(
+	collectors := []prometheus.Collector{
 		decisionDecisionsTotal,
 		decisionRulesHitTotal,
 		decisionEvalSeconds,
-		decisionGeoLookups,
-		decisionCountryHits,
-		decisionAsnHits,
 		decisionXffTrustedStripsTotal,
-	)
+	}
+	if *metricsGeoip {
+		collectors = append(collectors,
+			decisionGeoLookups,
+			decisionCountryHits,
+			decisionAsnHits,
+		)
+	}
+	prometheus.MustRegister(collectors...)
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
@@ -278,23 +284,30 @@ func main() {
 
 			var asn uint
 			var country string
+			geoMetricsEnabled := *metricsGeoip
 			if ip != nil && gdbSnapshot != nil {
 				if res, err := gdbSnapshot.Lookup(ip); err == nil {
 					asn = res.ASN
 					country = res.CountryISO
-					decisionGeoLookups.WithLabelValues("ok").Inc()
-					if country != "" {
+					if geoMetricsEnabled {
+						decisionGeoLookups.WithLabelValues("ok").Inc()
+					}
+					if geoMetricsEnabled && country != "" {
 						decisionCountryHits.WithLabelValues(country).Inc()
 					}
-					if asn != 0 {
+					if geoMetricsEnabled && asn != 0 {
 						labelASN := fmt.Sprintf("%d", asn)
 						decisionAsnHits.WithLabelValues(labelASN).Inc()
 					}
 				} else {
-					decisionGeoLookups.WithLabelValues("error").Inc()
+					if geoMetricsEnabled {
+						decisionGeoLookups.WithLabelValues("error").Inc()
+					}
 				}
 			} else {
-				decisionGeoLookups.WithLabelValues("no_db").Inc()
+				if geoMetricsEnabled {
+					decisionGeoLookups.WithLabelValues("no_db").Inc()
+				}
 			}
 
 			// Evaluate rules (engine will apply defaults precedence backend > frontend > global)

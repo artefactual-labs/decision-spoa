@@ -51,7 +51,7 @@ env GOTOOLCHAIN=local go build -trimpath -o build/decision-configcheck ./cmd/dec
 
 Append `--check-config` to validate the policy directory and exit without starting the service.
 
-The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses `/etc/default/decision-spoa` to pass CLI options. The stock configuration listens on `127.0.0.1:9908`, exposes metrics on `127.0.0.1:9907`, and enables best-effort GeoIP downloads plus the `metrics-host-label` toggle.
+The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses `/etc/default/decision-spoa` to pass CLI options. The stock configuration listens on `127.0.0.1:9908`, exposes metrics on `127.0.0.1:9907`, and enables best-effort GeoIP downloads. Optional high-cardinality metrics (`--metrics-host-label`, `--metrics-geoip`) remain disabled unless explicitly added to `DECISION_SPOA_OPTS`.
 
 ### Flags and environment variables
 
@@ -62,6 +62,7 @@ The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses
 | `--root` | `DECISION_ROOT` | `/etc/decision-policy` | Directory containing policy config files. |
 | `--debug` | `DECISION_DEBUG` | disabled | Enables verbose policy logs (see below). |
 | `--metrics-host-label` | `DECISION_METRICS_HOST_LABEL` | disabled | Adds the `host` label to metrics (higher cardinality). |
+| `--metrics-geoip` | `DECISION_METRICS_GEOIP` | disabled | Exports GeoIP metrics (`decision_policy_geo_lookups_total`, country, ASN counters). |
 | `--city-db` | `GEOIP_CITY_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | Path to City database. Optional but enables country lookups. |
 | `--asn-db` | `GEOIP_ASN_DB` | `/var/lib/GeoIP/GeoLite2-ASN.mmdb` | Path to ASN database. |
 | `--city-url` | `GEOIP_CITY_URL` | empty | Download URL consumed by the update helper. |
@@ -594,7 +595,7 @@ With `--best-effort` (or the default), the helper exits successfully even when t
   - `decision_policy_asn_hits_total{asn}`
   - `decision_policy_xff_trusted_strips_total{backend,host?}` (count of XFF hops removed via trusted lists)
 
-Disable the host label when you need to keep Prometheus/Grafana cardinality under control (`--metrics-host-label=false`).
+Leave the host label and GeoIP metrics disabled unless you are troubleshooting (`--metrics-host-label`, `--metrics-geoip`).
 
 ## Upgrade guide
 

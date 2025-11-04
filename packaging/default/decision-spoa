@@ -9,5 +9,8 @@ DECISION_SPOA_OPTS="\
   --asn-db /var/lib/decision/GeoLite2-ASN.mmdb \
   --city-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb \
   --asn-url https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb \
-  --best-effort \
-  --metrics-host-label"
+  --best-effort"
+
+# Add optional high-cardinality toggles when needed:
+# DECISION_SPOA_OPTS="$DECISION_SPOA_OPTS --metrics-host-label"
+# DECISION_SPOA_OPTS="$DECISION_SPOA_OPTS --metrics-geoip"
