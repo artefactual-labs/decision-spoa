@@ -61,6 +61,50 @@ type RawRuleMatch struct {
 	SNI      []string `yaml:"sni"`
 	JA3      []string `yaml:"ja3"`
 	Protocol []string `yaml:"protocol"` // shorthand when protocols only contains one value
+
+	unknownKeys []string `yaml:"-"`
+}
+
+func (m *RawRuleMatch) UnmarshalYAML(value *yaml.Node) error {
+	type raw RawRuleMatch
+	var aux raw
+	if err := value.Decode(&aux); err != nil {
+		return err
+	}
+	*m = RawRuleMatch(aux)
+	m.unknownKeys = nil
+
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("match must be a mapping node")
+	}
+
+	known := map[string]struct{}{
+		"xff":        {},
+		"host":       {},
+		"path":       {},
+		"method":     {},
+		"country":    {},
+		"cidr":       {},
+		"asn":        {},
+		"user_agent": {},
+		"query":      {},
+		"sni":        {},
+		"ja3":        {},
+		"protocol":   {},
+	}
+
+	for i := 0; i < len(value.Content); i += 2 {
+		keyNode := value.Content[i]
+		key := strings.ToLower(strings.TrimSpace(keyNode.Value))
+		if _, ok := known[key]; !ok {
+			m.unknownKeys = append(m.unknownKeys, keyNode.Value)
+		}
+	}
+
+	if len(m.unknownKeys) > 0 {
+		return fmt.Errorf("unknown match field(s): %s", strings.Join(m.unknownKeys, ", "))
+	}
+	return nil
 }
 
 // Rule encapsulates the compiled rule ready for evaluation.
@@ -288,6 +332,9 @@ func compileRule(rr RawRule) (Rule, error) {
 }
 
 func compileRuleMatch(raw RawRuleMatch) (RuleMatch, error) {
+	if len(raw.unknownKeys) > 0 {
+		return RuleMatch{}, fmt.Errorf("unknown match field(s): %s", strings.Join(raw.unknownKeys, ", "))
+	}
 	var match RuleMatch
 	match.Country = asLowerSet(raw.Country)
 	match.ASN = asUintSet(raw.ASN)
