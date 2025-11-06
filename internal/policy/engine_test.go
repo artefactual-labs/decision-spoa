@@ -13,8 +13,8 @@ type promRuleCounter struct {
 	vec *prometheus.CounterVec
 }
 
-func (p promRuleCounter) Inc(backend, host, rule string) {
-	p.vec.WithLabelValues(backend, host, rule).Inc()
+func (p promRuleCounter) Inc(componentType, component, host, rule string) {
+	p.vec.WithLabelValues(componentType, component, host, rule).Inc()
 }
 
 func TestEvaluateFirstMatch(t *testing.T) {
@@ -70,17 +70,18 @@ func TestEvaluateFirstMatch(t *testing.T) {
 	ruleHits := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hits",
 		Help: "hits",
-	}, []string{"backend", "host", "rule"})
+	}, []string{"component_type", "component", "host", "rule"})
 
 	out := cfg.Evaluate(Input{
-		Backend:      "be1",
-		BackendLabel: "be1",
-		Frontend:     "fe1",
-		Protocol:     "http",
-		Host:         "example.com",
-		Path:         "/static/app.js",
-		Method:       "GET",
-		Country:      "FR",
+		Backend:          "be1",
+		BackendLabel:     "be1",
+		BackendLabelType: "backend",
+		Frontend:         "fe1",
+		Protocol:         "http",
+		Host:             "example.com",
+		Path:             "/static/app.js",
+		Method:           "GET",
+		Country:          "FR",
 	}, promRuleCounter{vec: ruleHits}, false)
 
 	if out.Reason != "block-eu" {
@@ -96,7 +97,7 @@ func TestEvaluateFirstMatch(t *testing.T) {
 		t.Fatalf("use_varnish mismatch: %#v", out.Vars["policy.use_varnish"])
 	}
 
-	metric, err := ruleHits.GetMetricWithLabelValues("be1", "", "deny-eu")
+	metric, err := ruleHits.GetMetricWithLabelValues("backend", "be1", "", "deny-eu")
 	if err != nil {
 		t.Fatalf("GetMetricWithLabelValues: %v", err)
 	}
@@ -130,14 +131,15 @@ func TestEvaluateFallback(t *testing.T) {
 	ruleHits := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "hits",
 		Help: "hits",
-	}, []string{"backend", "host", "rule"})
+	}, []string{"component_type", "component", "host", "rule"})
 
 	out := cfg.Evaluate(Input{
-		Backend:      "be1",
-		BackendLabel: "be1",
-		Frontend:     "fe1",
-		Protocol:     "http",
-		IP:           net.ParseIP("203.0.113.10"),
+		Backend:          "be1",
+		BackendLabel:     "be1",
+		BackendLabelType: "backend",
+		Frontend:         "fe1",
+		Protocol:         "http",
+		IP:               net.ParseIP("203.0.113.10"),
 	}, promRuleCounter{vec: ruleHits}, false)
 
 	if out.Vars["policy.bucket"] != "default" {

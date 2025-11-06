@@ -34,11 +34,11 @@ var (
 	// NOTE: added "host" label. You can disable setting it via --metrics-host-label=false to reduce cardinality.
 	decisionDecisionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "decision_policy_decisions_total", Help: "Decisions by bucket and reason."},
-		[]string{"backend", "host", "bucket", "reason"},
+		[]string{"component_type", "component", "host", "bucket", "reason"},
 	)
 	decisionRulesHitTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "decision_policy_rule_hits_total", Help: "Rule matches."},
-		[]string{"backend", "host", "rule"},
+		[]string{"component_type", "component", "host", "rule"},
 	)
 	decisionEvalSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "decision_policy_eval_seconds",
@@ -59,7 +59,7 @@ var (
 	)
 	decisionXffTrustedStripsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "decision_policy_xff_trusted_strips_total", Help: "Number of XFF hops stripped via trusted proxy lists."},
-		[]string{"backend", "host"},
+		[]string{"component_type", "component", "host"},
 	)
 )
 
@@ -67,8 +67,8 @@ type promRuleCounter struct {
 	*prometheus.CounterVec
 }
 
-func (p promRuleCounter) Inc(backend, host, rule string) {
-	p.WithLabelValues(backend, host, rule).Inc()
+func (p promRuleCounter) Inc(componentType, component, host, rule string) {
+	p.WithLabelValues(componentType, component, host, rule).Inc()
 }
 
 func getenv(k, def string) string {
@@ -260,15 +260,18 @@ func main() {
 				protocol = "http"
 			}
 
-			// Normalize backend for metrics/rules context
-			normBE := backend
-			if normBE == "" || normBE == "default" {
+			// Normalize component for metrics/rules context
+			componentType := "backend"
+			componentName := backend
+			if componentName == "" || componentName == "default" {
+				componentType = "frontend"
 				if frontend != "" {
-					normBE = frontend
+					componentName = frontend
 				} else {
-					normBE = "frontend"
+					componentName = "frontend"
 				}
 			}
+			componentLabel := labelValue(componentName)
 
 			trusted := cfgSnapshot.TrustedFor(backend, frontend)
 			ip, strippedHops := xforwarded.FromXFF(src, xff, trusted)
@@ -312,21 +315,22 @@ func main() {
 
 			// Evaluate rules (engine will apply defaults precedence backend > frontend > global)
 			out := cfgSnapshot.Evaluate(policy.Input{
-				Backend:      backend,
-				BackendLabel: normBE,
-				Frontend:     frontend,
-				Protocol:     protocol,
-				XFF:          xff,
-				Method:       method,
-				Query:        query,
-				SNI:          sni,
-				JA3:          ja3,
-				IP:           ip,
-				ASN:          asn,
-				Country:      country,
-				UA:           ua,
-				Host:         host,
-				Path:         path,
+				Backend:          backend,
+				BackendLabel:     componentLabel,
+				BackendLabelType: componentType,
+				Frontend:         frontend,
+				Protocol:         protocol,
+				XFF:              xff,
+				Method:           method,
+				Query:            query,
+				SNI:              sni,
+				JA3:              ja3,
+				IP:               ip,
+				ASN:              asn,
+				Country:          country,
+				UA:               ua,
+				Host:             host,
+				Path:             path,
 			}, promRuleCounter{CounterVec: decisionRulesHitTotal}, *metricsHostLabel)
 
 			elapsed := time.Since(start).Seconds()
@@ -337,10 +341,10 @@ func main() {
 			}
 			if strippedHops > 0 {
 				value := float64(strippedHops)
-				decisionXffTrustedStripsTotal.WithLabelValues(normBE, labelHost).Add(value)
+				decisionXffTrustedStripsTotal.WithLabelValues(componentType, componentLabel, labelHost).Add(value)
 			}
 			bucketLabel := labelValue(out.Vars["policy.bucket"])
-			decisionDecisionsTotal.WithLabelValues(normBE, labelHost, bucketLabel, out.Reason).Inc()
+			decisionDecisionsTotal.WithLabelValues(componentType, componentLabel, labelHost, bucketLabel, out.Reason).Inc()
 
 			resp := make(map[string]interface{}, len(out.Vars)+1)
 			for k, v := range out.Vars {
@@ -353,7 +357,7 @@ func main() {
 			}
 			if cfgSnapshot.Debug {
 				log.Printf("policy: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s method=%s host=%s path=%s query=%q sni=%s ja3=%s ua=%q vars=%v",
-					sortedRaw(raw), frontend, normBE, src, xff, ip, xffUsed, strippedHops, peerTrusted, trustedEntries, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
+					sortedRaw(raw), frontend, backend, src, xff, ip, xffUsed, strippedHops, peerTrusted, trustedEntries, asn, country, strings.ToUpper(method), host, path, query, sni, ja3, ua, resp)
 			}
 			return resp, nil
 		},

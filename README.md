@@ -125,7 +125,7 @@ After editing either file, run `systemctl restart decision-spoa` or trigger the 
 
 ### HAProxy integration
 
-Configure HAProxy to send the fields expected by the agent (`src`, `xff`, `ua`, `host`, `path`, `method`, `query`, `backend`, `frontend`, and optionally `ssl_sni`, `ja3`, `protocol`) via SPOE messages and consume the returned variables:
+Configure HAProxy to send the fields expected by the agent (`src`, `xff`, `ua`, `host`, `path`, `method`, `query`, `backend`, `frontend`, and optionally `ssl_sni`, `ja3`, `protocol`) via SPOE messages and consume the returned variables. For accurate logging and Prometheus labels, avoid overriding the `backend` variable inside your HAProxy frontend definitions—let the agent receive an empty `backend` when traffic originates from a frontend so it can classify the request as `component_type="frontend"` automatically.
 
 ```haproxy
 spoe-agent decision-spoa

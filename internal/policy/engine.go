@@ -6,21 +6,22 @@ import (
 )
 
 type Input struct {
-	Backend      string
-	BackendLabel string
-	Frontend     string
-	Protocol     string
-	XFF          string
-	Method       string
-	Query        string
-	SNI          string
-	JA3          string
-	IP           net.IP
-	ASN          uint
-	Country      string
-	UA           string
-	Host         string
-	Path         string
+	Backend          string
+	BackendLabel     string
+	BackendLabelType string
+	Frontend         string
+	Protocol         string
+	XFF              string
+	Method           string
+	Query            string
+	SNI              string
+	JA3              string
+	IP               net.IP
+	ASN              uint
+	Country          string
+	UA               string
+	Host             string
+	Path             string
 }
 
 type Output struct {
@@ -30,7 +31,7 @@ type Output struct {
 
 // RuleHitCounter records rule hits for observability.
 type RuleHitCounter interface {
-	Inc(backend, host, rule string)
+	Inc(componentType, component, host, rule string)
 }
 
 func (c Config) baseVars(in Input) Vars {
@@ -56,16 +57,20 @@ func (c Config) Evaluate(in Input, ruleHits RuleHitCounter, withHostLabel bool) 
 		labelHost = in.Host
 	}
 
-	labelBackend := in.Backend
+	componentType := "backend"
+	if in.BackendLabelType != "" {
+		componentType = in.BackendLabelType
+	}
+	component := in.Backend
 	if in.BackendLabel != "" {
-		labelBackend = in.BackendLabel
+		component = in.BackendLabel
 	}
 
 	locked := make(map[string]struct{})
 
 	hit := func(rule string) {
 		if ruleHits != nil {
-			ruleHits.Inc(labelBackend, labelHost, rule)
+			ruleHits.Inc(componentType, component, labelHost, rule)
 		}
 	}
 
