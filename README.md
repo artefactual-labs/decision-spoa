@@ -380,6 +380,46 @@ Examples
       reason: trusted-tls
   ```
 
+### Field-by-Field Mapping (Code → Config/Usage)
+
+The policy engine consumes the following inputs (see `internal/policy/engine.go:Input`). This table explains how each can be used:
+
+- Scope/labeling
+  - `Backend`, `Frontend`: used to select defaults and to restrict rules via `backends:` / `frontends:` arrays on a rule.
+  - `BackendLabel`, `BackendLabelType`: internal, used only for Prometheus labels (`component`, `component_type`). Not matchable.
+
+- Matchable fields (policy.yml `match:`)
+  - `Country` → `country: ["CA", "ES", ...]` (ISO codes, case-insensitive).
+  - `ASN` → `asn: [15169, 8075, ...]` (integers).
+  - `IP` → match via `cidr: ["203.0.113.0/24", "2001:db8::/32"]`.
+  - `Method` → `method: ["GET", "POST"]`.
+  - `Host` → `host: ["plain.example.com", "^regex\\.example\\.com$"]` (exact or regex).
+  - `Path` → `path: ["^/static/"]` (regex array).
+  - `Query` → `query: ["(^|&)token=[^&]+(&|$)"]` (regex array; a.k.a. QueryRegex).
+  - `UA` → `user_agent: ["(?i)googlebot", ...]` (regex array).
+  - `XFF` → `xff: ["^10\\.", "proxy\.corp$"]` (regex array after trusted stripping).
+  - `SNI` → `sni: ["^api\\.example\\.com$"]` (regex array; requires passing `ssl_sni`).
+  - `JA3` → `ja3: ["^771,4865"]` (regex array; only if you pass JA3 via SPOE).
+  - `Protocol` → `protocol:` (or `protocols:`) — today only `http` is meaningful; default is `http` if unset.
+
+- Session counters and trust profile (not matchable in YAML — use HAProxy ACLs)
+  - `SessionPublicReqCount`, `SessionPublicRate`, `SessionPublicFirstPath`, `SessionPublicFirstPathDeep`, `SessionPublicIdleSeconds`.
+  - `SessionSpecialRole`, `SessionSpecialIdleSeconds`.
+  - Example ACLs: `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`.
+
+- Cookie‑Guard telemetry (not matchable in YAML — use HAProxy ACLs)
+  - `CookieGuardValid` → `var(txn.decision.cookieguard.valid)`.
+  - `CookieAgeSeconds` → `var(txn.decision.cookieguard.age_seconds)`.
+  - `ChallengeLevel` → `var(txn.decision.cookieguard.challenge_level)`.
+
+- Geo dependencies
+  - `Country` and `ASN` require GeoIP DBs to be present (`--city-db`, `--asn-db`). When missing, matches on these fields never fire.
+
+SPOE plumbing notes
+- To use SNI/JA3/protocol matchers, include those fields in your `spoe-message` args. The default sample passes `ssl_sni`; add `ja3=<expr>` only if you have a JA3 extractor.
+- Query matching operates on the raw query string (`args query=query`); do not include the leading `?` in your regex.
+
+
 ## Trusted context (context.yml)
 
 Session tracking and trusted-role hints are configured separately via `context.yml` in the same directory as `policy.yml`. The file declares which response headers/cookies HAProxy should forward, which session table they feed (`public` vs `special`), and any tags to stamp onto the resulting profile. Tags accept `${value}` (the raw backend value) and `${digest}` (after hashing/HMAC), so you can record roles without exposing the underlying session IDs.
