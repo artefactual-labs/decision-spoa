@@ -2,10 +2,12 @@
 
 This guide explains, in plain language, how the security stack deployed by [artefactual-labs/ansible-haproxy-decision](https://github.com/artefactual-labs/ansible-haproxy-decision) protects the service running at `decision-demo.example.net`. It assumes no prior knowledge of [HAProxy](https://www.haproxy.org), SPOA agents, or the [Decision](https://github.com/artefactual-labs/decision) project. The document is meant for customers who want to understand *what* is installed, *why* it is valuable, and *how* each moving part behaves.
 
-Two companion files contain the exact configuration discussed here:
+Companion files contain the exact configuration discussed here:
 
 - [`docs/ansible-haproxy-decision/haproxy.cfg`](ansible-haproxy-decision/haproxy.cfg)
 - [`docs/ansible-haproxy-decision/policy.yml`](ansible-haproxy-decision/policy.yml)
+- [`docs/ansible-haproxy-decision/context.yml`](ansible-haproxy-decision/context.yml)
+- [`docs/ansible-haproxy-decision/cookie-guard-spoa.cfg`](ansible-haproxy-decision/cookie-guard-spoa.cfg)
 
 Use this guide alongside those files to follow every line with a narrative explanation. 
 
@@ -63,7 +65,7 @@ Key idea: every request is evaluated by Decision, optionally challenged by Cooki
 8. **Backend-specific Decision call**. Before the request reaches Varnish or the origin, HAProxy labels it with the backend name (`varnish` or `app_backend`) and calls Decision again. This allows backend-specific rules and keeps metrics accurate.
 9. **Cookie Guard challenge (if required)**. If `use_challenge=true`, the backend invokes Cookie Guard:
    - Validation: if an `hb_v2` cookie is present, Cookie Guard verifies it.  
-   - Issuing: if the cookie is missing/invalid, Cookie Guard issues a new token and HAProxy serves a challenge page (`js_challenge_v2.html.lf`).
+   - Issuing: if the cookie is missing/invalid, HAProxy redirects to the ALTCHA controller at `/altcha` and proxies both the controller and assets to Cookie Guard’s HTTP listener (`cookie_guard_http_backend`).
 10. **Headers rewritten**. HAProxy writes the correct `Host`, `X-Real-IP`, and `X-Forwarded-Proto` headers so the backend sees consistent information.
 11. **Origin/varnish response**. The backend generates a response which travels back through HAProxy to the client.
 
