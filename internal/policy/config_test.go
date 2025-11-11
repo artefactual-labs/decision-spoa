@@ -153,3 +153,52 @@ func TestCompileRules(t *testing.T) {
 		t.Fatalf("rule return extra var missing")
 	}
 }
+
+func TestCompileExtendedMatchers(t *testing.T) {
+    raw := []RawRule{
+        {
+            Name: "session+cookie",
+            Match: RawRuleMatch{
+                SessionPublic: &RawSessionPublicMatch{
+                    ReqCount:       RawNumberCond{GE: ptrFloat(1)},
+                    Rate:           RawNumberCond{GE: ptrFloat(0)},
+                    FirstPathRegex: []string{`^/`},
+                    FirstPathDeep:  ptrBool(true),
+                    IdleSeconds:    RawNumberCond{LE: ptrFloat(3600)},
+                },
+                SessionSpecial: &RawSessionSpecialMatch{
+                    Role:        []string{"authenticated"},
+                    IdleSeconds: RawNumberCond{LT: ptrFloat(60)},
+                },
+                CookieGuard: &RawCookieGuardMatch{
+                    Valid:          ptrBool(true),
+                    AgeSeconds:     RawNumberCond{GT: ptrFloat(1.5)},
+                    ChallengeLevel: []string{"heavy"},
+                },
+            },
+            Return: map[string]interface{}{"policy.bucket": "ok"},
+        },
+        {Name: "fallback", Fallback: true, Return: map[string]interface{}{"reason": "fb"}},
+    }
+
+    rules, _, err := compileRules(raw)
+    if err != nil {
+        t.Fatalf("compileRules error: %v", err)
+    }
+    if len(rules) != 1 {
+        t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+    }
+    r := rules[0]
+    if len(r.Match.SessionPublic.FirstPathRegex) != 1 {
+        t.Fatalf("first_path_regex not compiled")
+    }
+    if r.Match.SessionPublic.FirstPathDeep == nil || *r.Match.SessionPublic.FirstPathDeep != true {
+        t.Fatalf("first_path_deep missing")
+    }
+    if _, ok := r.Return.Vars["policy.bucket"]; !ok {
+        t.Fatalf("return var missing")
+    }
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+func ptrBool(v bool) *bool       { return &v }

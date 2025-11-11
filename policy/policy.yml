@@ -3,6 +3,7 @@
 
 defaults:
   global:
+    policy.bucket: default
     use_varnish: true
     use_coraza: true
     use_challenge: true

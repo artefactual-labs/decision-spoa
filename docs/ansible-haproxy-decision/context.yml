@@ -1,0 +1,16 @@
+# Example Decision context configuration
+# Place alongside policy.yml (default: /etc/decision-policy)
+
+response:
+  mode: allowlist
+  headers: []
+  cookies:
+    - name: atom_authenticated
+      table: special
+      tags:
+        session.role: authenticated
+
+hash:
+  mode: hmac-sha256
+  secret_file: secrets/edge_hmac.key
+

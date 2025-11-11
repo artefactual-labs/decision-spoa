@@ -6,22 +6,32 @@ import (
 )
 
 type Input struct {
-	Backend          string
-	BackendLabel     string
-	BackendLabelType string
-	Frontend         string
-	Protocol         string
-	XFF              string
-	Method           string
-	Query            string
-	SNI              string
-	JA3              string
-	IP               net.IP
-	ASN              uint
-	Country          string
-	UA               string
-	Host             string
-	Path             string
+	Backend                    string
+	BackendLabel               string
+	BackendLabelType           string
+	Frontend                   string
+	Protocol                   string
+	XFF                        string
+	Method                     string
+	Query                      string
+	SNI                        string
+	JA3                        string
+	IP                         net.IP
+	ASN                        uint
+	Country                    string
+	UA                         string
+	Host                       string
+	Path                       string
+	SessionPublicReqCount      uint64
+	SessionPublicRate          float64
+	SessionPublicFirstPath     string
+	SessionPublicFirstPathDeep bool
+	SessionPublicIdleSeconds   float64
+	SessionSpecialRole         string
+	SessionSpecialIdleSeconds  float64
+	CookieAgeSeconds           float64
+	ChallengeLevel             string
+	CookieGuardValid           bool
 }
 
 type Output struct {
@@ -83,9 +93,8 @@ func (c Config) Evaluate(in Input, ruleHits RuleHitCounter, withHostLabel bool) 
 			continue
 		}
 
-		applyReturn(&out, rule.Return, locked, true)
-		if out.Reason == "" && rule.Return.Reason != "" {
-			out.Reason = rule.Return.Reason
+		if changed := applyReturn(&out, rule.Return, locked, true); !changed {
+			continue
 		}
 		hit(rule.Name)
 	}
@@ -248,10 +257,64 @@ func conditionsMatch(match RuleMatch, in Input) bool {
 			return false
 		}
 	}
+	// Extended session_public
+	if len(match.SessionPublic.FirstPathRegex) > 0 {
+		ok := false
+		for _, re := range match.SessionPublic.FirstPathRegex {
+			if re.MatchString(in.SessionPublicFirstPath) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if match.SessionPublic.FirstPathDeep != nil {
+		if in.SessionPublicFirstPathDeep != *match.SessionPublic.FirstPathDeep {
+			return false
+		}
+	}
+	if !match.SessionPublic.ReqCount.matches(float64(in.SessionPublicReqCount)) {
+		return false
+	}
+	if !match.SessionPublic.Rate.matches(in.SessionPublicRate) {
+		return false
+	}
+	if !match.SessionPublic.IdleSeconds.matches(in.SessionPublicIdleSeconds) {
+		return false
+	}
+
+	// Extended session_special
+	if len(match.SessionSpecial.Role) > 0 {
+		role := strings.ToLower(strings.TrimSpace(in.SessionSpecialRole))
+		if _, ok := match.SessionSpecial.Role[role]; !ok {
+			return false
+		}
+	}
+	if !match.SessionSpecial.IdleSeconds.matches(in.SessionSpecialIdleSeconds) {
+		return false
+	}
+
+	// Extended cookie_guard
+	if match.CookieGuard.Valid != nil {
+		if in.CookieGuardValid != *match.CookieGuard.Valid {
+			return false
+		}
+	}
+	if !match.CookieGuard.AgeSeconds.matches(in.CookieAgeSeconds) {
+		return false
+	}
+	if len(match.CookieGuard.ChallengeLevel) > 0 {
+		lvl := strings.ToLower(strings.TrimSpace(in.ChallengeLevel))
+		if _, ok := match.CookieGuard.ChallengeLevel[lvl]; !ok {
+			return false
+		}
+	}
 	return true
 }
 
-func applyReturn(out *Output, ret RuleReturn, locked map[string]struct{}, lock bool) {
+func applyReturn(out *Output, ret RuleReturn, locked map[string]struct{}, lock bool) (changed bool) {
 	if len(ret.Vars) > 0 {
 		if out.Vars == nil {
 			out.Vars = make(Vars, len(ret.Vars))
@@ -263,15 +326,19 @@ func applyReturn(out *Output, ret RuleReturn, locked map[string]struct{}, lock b
 				}
 				out.Vars[k] = v
 				locked[k] = struct{}{}
+				changed = true
 				continue
 			}
 			if _, exists := out.Vars[k]; exists {
 				continue
 			}
 			out.Vars[k] = v
+			changed = true
 		}
 	}
 	if ret.Reason != "" && out.Reason == "" {
 		out.Reason = ret.Reason
+		changed = true
 	}
+	return changed
 }

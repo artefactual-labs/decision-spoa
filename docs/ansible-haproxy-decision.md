@@ -2,10 +2,12 @@
 
 This guide explains, in plain language, how the security stack deployed by [artefactual-labs/ansible-haproxy-decision](https://github.com/artefactual-labs/ansible-haproxy-decision) protects the service running at `decision-demo.example.net`. It assumes no prior knowledge of [HAProxy](https://www.haproxy.org), SPOA agents, or the [Decision](https://github.com/artefactual-labs/decision) project. The document is meant for customers who want to understand *what* is installed, *why* it is valuable, and *how* each moving part behaves.
 
-Two companion files contain the exact configuration discussed here:
+Companion files contain the exact configuration discussed here:
 
 - [`docs/ansible-haproxy-decision/haproxy.cfg`](ansible-haproxy-decision/haproxy.cfg)
 - [`docs/ansible-haproxy-decision/policy.yml`](ansible-haproxy-decision/policy.yml)
+- [`docs/ansible-haproxy-decision/context.yml`](ansible-haproxy-decision/context.yml)
+- [`docs/ansible-haproxy-decision/cookie-guard-spoa.cfg`](ansible-haproxy-decision/cookie-guard-spoa.cfg)
 
 Use this guide alongside those files to follow every line with a narrative explanation. 
 
@@ -26,46 +28,23 @@ Use this guide alongside those files to follow every line with a narrative expla
 
 ## 2. High-Level Architecture
 
-```
-                 Internet Clients
-                        |
-                        v
-         +-------------------------------+
-         | Reverse Proxy (192.0.2.10)    |
-         | - Terminates public TLS       |
-         | - Adds X-Forwarded-For header |
-         +-------------------------------+
-                        |
-                        v
-         +----------------------------------------------+
-         | HAProxy (192.0.2.20)                         |
-         | 1. Decision SPOA (policy engine)             |
-         | 2. Coraza SPOA (WAF)                         |
-         | 3. Cookie Guard SPOA (JS challenge)          |
-         | 4. Routing to varnish/origin/certbot         |
-         +----------------------------------------------+
-              |                               |
-              |                               |
- +---------------------------+   +---------------------------+
- | HAProxy backend varnish   |   | HAProxy backend           |
- | (routes through Varnish)  |   | app_backend               |
- +---------------------------+   | (direct to origin)        |
-             |                   +---------------------------+
-             |                                              |                      
-  +----------------------------------------------+           |
-  | Varnish cache (127.0.0.1:6081)               |           |
-  |  - Serves cached responses                   |           |
-  |  - Cache miss → Origin nginx (127.0.0.1:80)  |           |
-  +----------------------------------------------+           |
-             |                                              |
-             +------------------------------+---------------+
-                                            |
-       +--------------------------------------------+
-       | Origin nginx (127.0.0.1:80)                |
-       |  - Hosts the AtoM application              |
-       |  - Serves direct HAProxy traffic and       |
-       |    cache misses from Varnish               |
-       +--------------------------------------------+
+```mermaid
+flowchart TB
+    C[Internet Clients]
+    RP[Reverse Proxy\n192.0.2.10\nTLS termination\nAdds X-Forwarded-For]
+    subgraph HAProxy[HAProxy 192.0.2.20]
+        D[Decision SPOA\nPolicy engine]
+        W[Coraza SPOA\nWAF]
+        G[Cookie Guard SPOA\nJS challenge]
+        R[Routing\nvarnish/origin/certbot]
+    end
+    V[HAProxy backend varnish\n→ Varnish cache 127.0.0.1:6081]
+    O[HAProxy backend app_backend\n→ Origin nginx 127.0.0.1:80]
+
+    C --> RP --> D --> W --> G --> R
+    R --> V
+    R --> O
+    V --> O
 ```
 
 Key idea: every request is evaluated by Decision, optionally challenged by Cookie Guard, optionally inspected by Coraza, and finally routed either through Varnish (for speed) or directly to the origin (for accuracy). Trusted internal flows bypass protections automatically.
@@ -86,7 +65,7 @@ Key idea: every request is evaluated by Decision, optionally challenged by Cooki
 8. **Backend-specific Decision call**. Before the request reaches Varnish or the origin, HAProxy labels it with the backend name (`varnish` or `app_backend`) and calls Decision again. This allows backend-specific rules and keeps metrics accurate.
 9. **Cookie Guard challenge (if required)**. If `use_challenge=true`, the backend invokes Cookie Guard:
    - Validation: if an `hb_v2` cookie is present, Cookie Guard verifies it.  
-   - Issuing: if the cookie is missing/invalid, Cookie Guard issues a new token and HAProxy serves a challenge page (`js_challenge_v2.html.lf`).
+   - Issuing: if the cookie is missing/invalid, HAProxy redirects to the ALTCHA controller at `/altcha` and proxies both the controller and assets to Cookie Guard’s HTTP listener (`cookie_guard_http_backend`).
 10. **Headers rewritten**. HAProxy writes the correct `Host`, `X-Real-IP`, and `X-Forwarded-Proto` headers so the backend sees consistent information.
 11. **Origin/varnish response**. The backend generates a response which travels back through HAProxy to the client.
 
