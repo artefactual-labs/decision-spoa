@@ -1,17 +1,17 @@
 package policy
 
 import (
-	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strings"
+    "fmt"
+    "net"
+    "os"
+    "path/filepath"
+    "regexp"
+    "sort"
+    "strings"
 
-	"github.com/artefactual-labs/decision-spoa/internal/xforwarded"
+    "github.com/artefactual-labs/decision-spoa/internal/xforwarded"
 
-	"gopkg.in/yaml.v3"
+    "gopkg.in/yaml.v3"
 )
 
 // Vars is a generic bag of variables the policy will return to HAProxy.
@@ -49,18 +49,23 @@ type RawRule struct {
 
 // RawRuleMatch captures optional match clauses. All slices are OR-ed.
 type RawRuleMatch struct {
-	XFF      []string `yaml:"xff"`
-	Host     []string `yaml:"host"`
-	Path     []string `yaml:"path"`
-	Method   []string `yaml:"method"`
-	Country  []string `yaml:"country"`
-	CIDR     []string `yaml:"cidr"`
-	ASN      []uint   `yaml:"asn"`
-	UA       []string `yaml:"user_agent"`
-	Query    []string `yaml:"query"`
-	SNI      []string `yaml:"sni"`
-	JA3      []string `yaml:"ja3"`
-	Protocol []string `yaml:"protocol"` // shorthand when protocols only contains one value
+    XFF      []string `yaml:"xff"`
+    Host     []string `yaml:"host"`
+    Path     []string `yaml:"path"`
+    Method   []string `yaml:"method"`
+    Country  []string `yaml:"country"`
+    CIDR     []string `yaml:"cidr"`
+    ASN      []uint   `yaml:"asn"`
+    UA       []string `yaml:"user_agent"`
+    Query    []string `yaml:"query"`
+    SNI      []string `yaml:"sni"`
+    JA3      []string `yaml:"ja3"`
+    Protocol []string `yaml:"protocol"` // shorthand when protocols only contains one value
+
+    // Extended matchers (Option A): session, trust, and Cookie‑Guard telemetry
+    SessionPublic  *RawSessionPublicMatch  `yaml:"session_public"`
+    SessionSpecial *RawSessionSpecialMatch `yaml:"session_special"`
+    CookieGuard    *RawCookieGuardMatch    `yaml:"cookie_guard"`
 
 	unknownKeys []string `yaml:"-"`
 }
@@ -78,20 +83,23 @@ func (m *RawRuleMatch) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("match must be a mapping node")
 	}
 
-	known := map[string]struct{}{
-		"xff":        {},
-		"host":       {},
-		"path":       {},
-		"method":     {},
-		"country":    {},
-		"cidr":       {},
-		"asn":        {},
-		"user_agent": {},
-		"query":      {},
-		"sni":        {},
-		"ja3":        {},
-		"protocol":   {},
-	}
+    known := map[string]struct{}{
+        "xff":        {},
+        "host":       {},
+        "path":       {},
+        "method":     {},
+        "country":    {},
+        "cidr":       {},
+        "asn":        {},
+        "user_agent": {},
+        "query":      {},
+        "sni":        {},
+        "ja3":        {},
+        "protocol":   {},
+        "session_public":  {},
+        "session_special": {},
+        "cookie_guard":    {},
+    }
 
 	for i := 0; i < len(value.Content); i += 2 {
 		keyNode := value.Content[i]
@@ -120,24 +128,151 @@ type Rule struct {
 
 // RuleMatch holds compiled matchers.
 type RuleMatch struct {
-	HostExact  map[string]struct{}
-	HostRegex  []*regexp.Regexp
-	PathRegex  []*regexp.Regexp
-	XFFRegex   []*regexp.Regexp
-	UARegex    []*regexp.Regexp
-	QueryRegex []*regexp.Regexp
-	SNIRegex   []*regexp.Regexp
-	JA3Regex   []*regexp.Regexp
-	Country    map[string]struct{}
-	CIDR       []*net.IPNet
-	ASN        map[uint]struct{}
-	Method     map[string]struct{}
+    HostExact  map[string]struct{}
+    HostRegex  []*regexp.Regexp
+    PathRegex  []*regexp.Regexp
+    XFFRegex   []*regexp.Regexp
+    UARegex    []*regexp.Regexp
+    QueryRegex []*regexp.Regexp
+    SNIRegex   []*regexp.Regexp
+    JA3Regex   []*regexp.Regexp
+    Country    map[string]struct{}
+    CIDR       []*net.IPNet
+    ASN        map[uint]struct{}
+    Method     map[string]struct{}
+
+    // Extended: compiled session and Cookie‑Guard matchers
+    SessionPublic  SessionPublicMatch
+    SessionSpecial SessionSpecialMatch
+    CookieGuard    CookieGuardMatch
 }
 
 // RuleReturn stores explicit overrides and extra vars.
 type RuleReturn struct {
-	Reason string
-	Vars   Vars
+    Reason string
+    Vars   Vars
+}
+
+// --- Extended matcher types ---
+
+// RawNumberCond captures numeric comparisons in YAML.
+type RawNumberCond struct {
+    GE *float64 `yaml:"ge"`
+    GT *float64 `yaml:"gt"`
+    LE *float64 `yaml:"le"`
+    LT *float64 `yaml:"lt"`
+    EQ *float64 `yaml:"eq"`
+}
+
+type NumberCond struct {
+    GE *float64
+    GT *float64
+    LE *float64
+    LT *float64
+    EQ *float64
+}
+
+func compileNumberCond(raw RawNumberCond) (NumberCond, error) {
+    // No validation beyond presence; conflicting operators are allowed and must all match.
+    return NumberCond{GE: raw.GE, GT: raw.GT, LE: raw.LE, LT: raw.LT, EQ: raw.EQ}, nil
+}
+
+func (c NumberCond) matches(v float64) bool {
+    if c.EQ != nil && v != *c.EQ {
+        return false
+    }
+    if c.GE != nil && v < *c.GE {
+        return false
+    }
+    if c.GT != nil && v <= *c.GT {
+        return false
+    }
+    if c.LE != nil && v > *c.LE {
+        return false
+    }
+    if c.LT != nil && v >= *c.LT {
+        return false
+    }
+    return true
+}
+
+type RawSessionPublicMatch struct {
+    ReqCount        RawNumberCond `yaml:"req_count"`
+    Rate            RawNumberCond `yaml:"rate"`
+    FirstPathRegex  []string      `yaml:"first_path_regex"`
+    FirstPathDeep   *bool         `yaml:"first_path_deep"`
+    IdleSeconds     RawNumberCond `yaml:"idle_seconds"`
+}
+
+type SessionPublicMatch struct {
+    ReqCount       NumberCond
+    Rate           NumberCond
+    FirstPathRegex []*regexp.Regexp
+    FirstPathDeep  *bool
+    IdleSeconds    NumberCond
+}
+
+type RawSessionSpecialMatch struct {
+    Role        []string     `yaml:"role"`
+    IdleSeconds RawNumberCond `yaml:"idle_seconds"`
+}
+
+type SessionSpecialMatch struct {
+    Role        map[string]struct{}
+    IdleSeconds NumberCond
+}
+
+type RawCookieGuardMatch struct {
+    Valid          *bool        `yaml:"valid"`
+    AgeSeconds     RawNumberCond `yaml:"age_seconds"`
+    ChallengeLevel []string     `yaml:"challenge_level"`
+}
+
+type CookieGuardMatch struct {
+    Valid          *bool
+    AgeSeconds     NumberCond
+    ChallengeLevel map[string]struct{}
+}
+
+func compileSessionPublic(raw RawSessionPublicMatch) (SessionPublicMatch, error) {
+    rc, _ := compileNumberCond(raw.ReqCount)
+    rt, _ := compileNumberCond(raw.Rate)
+    idle, _ := compileNumberCond(raw.IdleSeconds)
+    var re []*regexp.Regexp
+    for _, s := range raw.FirstPathRegex {
+        r, err := regexp.Compile(s)
+        if err != nil {
+            return SessionPublicMatch{}, fmt.Errorf("compile first_path_regex %q: %w", s, err)
+        }
+        re = append(re, r)
+    }
+    return SessionPublicMatch{ReqCount: rc, Rate: rt, FirstPathRegex: re, FirstPathDeep: raw.FirstPathDeep, IdleSeconds: idle}, nil
+}
+
+func compileSessionSpecial(raw RawSessionSpecialMatch) (SessionSpecialMatch, error) {
+    idle, _ := compileNumberCond(raw.IdleSeconds)
+    roles := make(map[string]struct{}, len(raw.Role))
+    for _, r := range raw.Role {
+        r = strings.TrimSpace(strings.ToLower(r))
+        if r == "" {
+            continue
+        }
+        roles[r] = struct{}{}
+    }
+    return SessionSpecialMatch{Role: roles, IdleSeconds: idle}, nil
+}
+
+func compileCookieGuard(raw RawCookieGuardMatch) (CookieGuardMatch, error) {
+    age, _ := compileNumberCond(raw.AgeSeconds)
+    levels := make(map[string]struct{}, len(raw.ChallengeLevel))
+    for _, l := range raw.ChallengeLevel {
+        l = strings.TrimSpace(strings.ToLower(l))
+        if l == "" {
+            continue
+        }
+        levels[l] = struct{}{}
+    }
+    return CookieGuardMatch{Valid: raw.Valid, AgeSeconds: age, ChallengeLevel: levels}, nil
 }
 
 // Config holds compiled rules, defaults, and trusted proxy settings.
@@ -396,15 +531,38 @@ func compileRuleMatch(raw RawRuleMatch) (RuleMatch, error) {
 		}
 		match.UARegex = append(match.UARegex, re)
 	}
-	for _, cidr := range raw.CIDR {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err != nil {
-			return RuleMatch{}, fmt.Errorf("parse cidr %q: %w", cidr, err)
-		}
-		match.CIDR = append(match.CIDR, network)
-	}
+    for _, cidr := range raw.CIDR {
+        _, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+        if err != nil {
+            return RuleMatch{}, fmt.Errorf("parse cidr %q: %w", cidr, err)
+        }
+        match.CIDR = append(match.CIDR, network)
+    }
 
-	return match, nil
+    // Compile extended matchers
+    if raw.SessionPublic != nil {
+        sp, err := compileSessionPublic(*raw.SessionPublic)
+        if err != nil {
+            return RuleMatch{}, err
+        }
+        match.SessionPublic = sp
+    }
+    if raw.SessionSpecial != nil {
+        ss, err := compileSessionSpecial(*raw.SessionSpecial)
+        if err != nil {
+            return RuleMatch{}, err
+        }
+        match.SessionSpecial = ss
+    }
+    if raw.CookieGuard != nil {
+        cg, err := compileCookieGuard(*raw.CookieGuard)
+        if err != nil {
+            return RuleMatch{}, err
+        }
+        match.CookieGuard = cg
+    }
+
+    return match, nil
 }
 
 func normalizeReturn(raw map[string]interface{}, ruleName string) (RuleReturn, error) {

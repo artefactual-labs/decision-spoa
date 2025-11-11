@@ -248,6 +248,52 @@ spoe-group decide_response
     messages decide_response
 ```
 
+### SPOE Inputs and Outputs
+
+The tables below list the request/response variables exchanged between HAProxy and Decision.
+
+**Inputs (HAProxy → Decision)**
+
+| Name | Required? | Source | Purpose |
+| --- | --- | --- | --- |
+| `src` | Yes | implicit | Socket peer IP (before trusted stripping) |
+| `xff` | Optional | `hdr(X-Forwarded-For)` | Used with `src` + trusted list to find real client IP |
+| `ua` | Yes | `hdr(User-Agent)` | Regex matching and UA+IP fallback for session keys |
+| `host` | Yes | `hdr(host)` | Host-based rules/scopes |
+| `path` | Yes | `path` | Regex/path matching |
+| `method` | Yes | `method` | `match.method` comparisons |
+| `query` | Yes | `query` (raw string, no `?`) | Regex on query params |
+| `ssl_sni` | Optional | `ssl_fc_sni` | SNI matches (if TLS info available) |
+| `ja3` | Optional | `ssl_fc_ja3_hash` (HAProxy ≥2.5) | JA3/TLS fingerprint matching |
+| `frontend` / `backend` | Yes | Vars set by HAProxy (`set-var(txn.decision_frontend/backend)`) | Scope defaults/rules, Prom labels |
+| `req_cookies` | Optional | `hdr(cookie)` | Session fallback (UA+IP vs cookies) |
+| `cookieguard_valid` | Optional | `var(txn.cookieguard.valid)` | Whether hb_v2/hb_v3 verified |
+| `cookieguard_age` | Optional | `var(txn.cookieguard.age_seconds)` | Age of the verified token |
+| `cookieguard_level` | Optional | `var(txn.cookieguard.challenge_level)` | Challenge tier just issued (only set during challenge) |
+| `cookieguard_session` | Optional | `var(txn.cookieguard.session_hmac)` | Durable hb_v3 session hash (requires issue-token) |
+| `session.public.key` *(response → request handoff)* | Optional | Resent by HAProxy if you capture it between calls | Keeps session continuity through restarts |
+| `res.hdrs` *(response message)* | Optional | Full response headers on `decide_response` | context.yml allowlist (special/public tables) |
+
+**Outputs (Decision → HAProxy)**
+
+Each output becomes `var(txn.decision.<name>)` because the SPOE agent uses `option var-prefix decision`.
+
+| Output | Description / Example uses |
+| --- | --- |
+| `policy.bucket` | Label for metrics/logs (e.g., `default`, `rate=deny`). Gate routing or PromQL on it. |
+| `reason` | Human-friendly reason string; also emitted as plain `reason`. |
+| `deny` | Boolean/string. `http-request deny if { var(txn.decision.deny) -m str true }`. |
+| `use_varnish` | `use_backend varnish if { var(txn.decision.use_varnish) -m bool true }`. |
+| `use_challenge` | Run Cookie Guard/ALTCHA when true. |
+| `use_coraza` | Enable/disable Coraza WAF. |
+| `rate_bot` | Feed stick-table rate limits: `track-sc0` / `deny` when over threshold. |
+| Custom vars (e.g., `policy.challenge_mode`, `policy.backend`, etc.) | Use in ACLs or to propagate context downstream (`set-header`, `set-var`). |
+| `session.public.key`, `.req_count`, `.rate`, `.idle_seconds`, `.first_path`, `.first_path_deep`, `.recent_hits`, `.rate_window_seconds` | Inspect/limit session behaviour directly in HAProxy (e.g., `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`). |
+| `session.special.role`, `.groups`, `.idle_seconds` | Trusted user hints (from context.yml). Skip challenges or grant bypass for known roles. |
+| `cookieguard.valid`, `.age_seconds`, `.challenge_level` | Mirror of Cookie Guard telemetry (validity/age/challenge mode). |
+
+All outputs are optional except the ones your HAProxy logic relies on; use `-m bool`/`-m found` guards before acting on them. Defaults + fallback in `policy.yml` ensure the variables you care about are always present.
+
 `res.hdrs` forwards the full response header block, letting Decision’s allowlist in `context.yml` pick the signals that matter. Operators that prefer a strict allowlist at HAProxy can set variables such as `http-response set-var(txn.decision.hdr.atom_authenticated) res.hdr(Atom-Authenticated)` and replace `res.hdrs=res.hdrs` with those individual vars. The request group must include the Cookie Guard outputs shown above so the public session table can hash on the durable session ID rather than raw IP addresses. Decision returns the hashed `session.public.key`, counts/rates, and `session.special.role` back to HAProxy under `var(txn.decision.*)` for use in ACLs or to forward into the response group.
 
 ## Policy configuration
@@ -340,6 +386,19 @@ This section documents every supported field in `policy.yml` and how matches are
   - `sni`: list of regular expressions matched against the TLS SNI (when provided via SPOE).
   - `ja3`: list of regular expressions matched against the JA3/TLS fingerprint (when provided via SPOE).
   - `protocol`: shorthand to constrain a rule by protocol; equivalent to `protocols` when only one value is present. Today only `http` is meaningful.
+  - `session_public`: session counters for the public session table
+    - `req_count`: numeric comparator map `{ge|gt|le|lt|eq: <number>}`
+    - `rate`: numeric comparator map
+    - `first_path_regex`: array of regexes for the first path seen
+    - `first_path_deep`: boolean (true/false)
+    - `idle_seconds`: numeric comparator map
+  - `session_special`: trust profile matches
+    - `role`: array of roles (strings)
+    - `idle_seconds`: numeric comparator map
+  - `cookie_guard`: JS challenge telemetry
+    - `valid`: boolean
+    - `age_seconds`: numeric comparator map
+    - `challenge_level`: array of levels (strings)
 
 - Return map
   - `reason` (string): optional human‑readable reason. If omitted, the fallback reason applies (default `"default-policy"`).
@@ -351,14 +410,37 @@ This section documents every supported field in `policy.yml` and how matches are
   - If you omit the fallback rule, the agent injects an implicit fallback with `reason: default-policy`.
 
 Notes on session‑driven inputs
-- Decision exposes rich session counters and Cookie‑Guard signals to HAProxy and to logs/metrics:
+- Decision exposes rich session counters and Cookie‑Guard signals to HAProxy and to logs/metrics, and they are also matchable under `session_public`, `session_special`, and `cookie_guard`:
   - Public session (available as `var(txn.decision.session.public.*)` in HAProxy; also printed under `public={...}` in debug logs): `key`, `key_source`, `req_count`, `recent_hits`, `rate`, `rate_window_seconds`, `idle_seconds`, `first_path`, `first_path_deep`.
   - Special session (trusted profile): `session.special.role`, `session.special.groups`, `session.special.idle_seconds`.
   - Cookie‑Guard: `cookieguard.valid` (bool), `cookieguard.age_seconds` (float), `cookieguard.challenge_level` (string).
-- These inputs are not yet first‑class match fields in `policy.yml`. If you need enforcement based on them today, use HAProxy ACLs directly, e.g.:
-  - `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`
-  - `http-request set-var(txn.decision.challenge_mode) str(heavy) if { var(txn.decision.cookieguard.age_seconds) lt 2 }`
-  Future versions may add YAML `match` clauses for these counters; for now they’re meant for visibility and HAProxy‑side ACLs.
+Examples using session and Cookie‑Guard matchers
+```yaml
+- name: bursty-client
+  match:
+    session_public:
+      req_count: { ge: 100 }
+      rate: { gt: 5 }
+      idle_seconds: { lt: 10 }
+  return:
+    reason: burst-detected
+
+- name: trusted-editor-grace
+  match:
+    session_special:
+      role: ["editor", "authenticated"]
+  return:
+    use_challenge: false
+    reason: editor-grace
+
+- name: fresh-cookie-ok
+  match:
+    cookie_guard:
+      valid: true
+      age_seconds: { gt: 2 }
+  return:
+    reason: cg-fresh
+```
 
 Examples
 - Match on query parameter value and set a reason without changing other defaults:
@@ -402,22 +484,22 @@ The policy engine consumes the following inputs (see `internal/policy/engine.go:
   - `JA3` → `ja3: ["^771,4865"]` (regex array; only if you pass JA3 via SPOE).
   - `Protocol` → `protocol:` (or `protocols:`) — today only `http` is meaningful; default is `http` if unset.
 
-- Session counters and trust profile (not matchable in YAML — use HAProxy ACLs)
-  - `SessionPublicReqCount`, `SessionPublicRate`, `SessionPublicFirstPath`, `SessionPublicFirstPathDeep`, `SessionPublicIdleSeconds`.
-  - `SessionSpecialRole`, `SessionSpecialIdleSeconds`.
-  - Example ACLs: `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`.
+- Session counters and trust profile (now matchable via nested blocks)
+  - `SessionPublic*` → `match.session_public.{req_count, rate, first_path_regex, first_path_deep, idle_seconds}`.
+  - `SessionSpecial*` → `match.session_special.{role, idle_seconds}`.
+  - You can still enforce via HAProxy ACLs when preferred, e.g. `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`.
 
-- Cookie‑Guard telemetry (not matchable in YAML — use HAProxy ACLs)
-  - `CookieGuardValid` → `var(txn.decision.cookieguard.valid)`.
-  - `CookieAgeSeconds` → `var(txn.decision.cookieguard.age_seconds)`.
-  - `ChallengeLevel` → `var(txn.decision.cookieguard.challenge_level)`.
+- Cookie‑Guard telemetry (now matchable)
+  - `CookieGuardValid` → `match.cookie_guard.valid`.
+  - `CookieAgeSeconds` → `match.cookie_guard.age_seconds`.
+  - `ChallengeLevel` → `match.cookie_guard.challenge_level`.
 
 - Geo dependencies
   - `Country` and `ASN` require GeoIP DBs to be present (`--city-db`, `--asn-db`). When missing, matches on these fields never fire.
 
 SPOE plumbing notes
 - To use SNI/JA3/protocol matchers, include those fields in your `spoe-message` args. The default sample passes `ssl_sni`; add `ja3=<expr>` only if you have a JA3 extractor.
-- Query matching operates on the raw query string (`args query=query`); do not include the leading `?` in your regex.
+- Query matching operates on the raw query string (`args query=query`); you don’t need to include the `?` in your regex.
 
 
 ## Trusted context (context.yml)
@@ -566,10 +648,11 @@ Because later merges overwrite earlier values, backend-specific defaults win ove
 - `country` expects ISO alpha-2 codes. `asn` takes unsigned integers. `cidr` supports IPv4/IPv6 ranges in CIDR notation.
 - Scope filters (`frontends`, `backends`, `protocols`) constrain where the rule can run. Omit the field to allow every value. Protocol names are lower-cased strings; `http` is assumed if none are supplied.
 - `return` is an arbitrary key/value map. Nothing is reserved—emit whichever variables you intend to consume in HAProxy (e.g., `policy.bucket`, `policy.challenge`, custom flags), and gate behaviour there with `var()` checks.
+- Rules that don’t unlock any new variables (because every key they want to set is already locked by an earlier rule) are skipped silently: they do not change `reason`, they don’t produce Prometheus rule-hit metrics, and HAProxy never sees them. Ordering still matters—first matching rule wins ownership of each key—but this skip keeps metrics meaningful and mirrors the “first writer wins” semantics in behaviour as well as observability.
 
 Always end the file with a `fallback` rule. The agent will merge fallback values with the defaults so you can keep using the existing global/front/back `defaults` structure.
 
-### Validating policy.yml
+### Validating policy and context
 
 Use the standalone config checker before deploying changes:
 
@@ -577,7 +660,7 @@ Use the standalone config checker before deploying changes:
 ./build/decision-configcheck --root /etc/decision-policy
 ```
 
-The command loads and compiles `policy.yml`; it exits non-zero on parse errors, invalid CIDR blocks, bad regular expressions, or missing defaults.
+The command loads and compiles `policy.yml` and `context.yml`. It exits non-zero on parse errors, invalid CIDR blocks, bad regular expressions, unknown match fields, or missing defaults. When `context.yml` is present it also reads the HMAC secret (if configured) and prints a brief summary (counts and hash mode).
 
 ### Rule Design Tips
 
