@@ -192,6 +192,19 @@ frontend fe_proxy
     http-response send-spoe-group decision decide_response
 ```
 
+SPOE argument reference
+- Request group (decide_request)
+  - Required for policy matching: `src`, `xff`, `ua` (User‑Agent), `host`, `path`, `method`, `query`, `frontend`, `backend`.
+  - Optional but supported matchers: `ssl_sni` (TLS SNI), `ja3` (TLS fingerprint), `protocol` (defaults to `http`).
+  - Cookie‑Guard telemetry (optional but recommended): `cookieguard_valid`, `cookieguard_age`, `cookieguard_level`, `cookieguard_session`.
+  - Session key carry‑over: `session.public.key` (echo the key returned by a previous decide_request).
+- Response group (decide_response)
+  - Response headers: `res.hdrs` (full header block, recommended) or individual variables set upstream via `http-response set-var`.
+  - Session key carry‑over: `session.public.key` (mirror of `var(txn.decision.session.public.key)`), so Decision can correlate response signals with the correct session entry.
+
+Notes
+- The canonical, end‑to‑end HAProxy example that uses these messages lives under `docs/ansible-haproxy-decision/haproxy.cfg` and shows Cookie‑Guard ALTCHA integration plus Coraza and Varnish wiring.
+
 The sample SPOE file mirrors this layout:
 
 ```haproxy
@@ -298,6 +311,74 @@ rules:
 ```
 
 The fallback entry acts as the safety net when no earlier rule matches. It should describe the baseline decision your HAProxy configuration expects (for example, setting a catch-all reason or toggling an audit flag). You may leave the `return` map empty if the defaults already cover everything; the agent still enforces an implicit `"default-policy"` reason. If you omit the fallback altogether, the compiler injects that implicit rule, so keeping one is optional. Retain it when you want to document the “otherwise” path explicitly or to perform conditional work such as setting a reason only for unmatched traffic while allowing earlier rules to keep their own values.
+
+### Policy YAML Reference (Complete)
+
+This section documents every supported field in `policy.yml` and how matches are evaluated.
+
+- Top-level keys
+  - `defaults` (required)
+    - `global`: map of default variables applied to all requests.
+    - `frontends`: map keyed by HAProxy frontend name → default variables for traffic that passed through that frontend.
+    - `backends`: map keyed by HAProxy backend name → default variables for traffic targeted to that backend.
+    - Values are arbitrary keys; common ones we use in examples: `use_varnish` (bool), `use_coraza` (bool), `use_challenge` (bool), `deny` (bool), `rate_bot` (bool), `policy.bucket` (string).
+  - `trusted_proxy` (optional)
+    - `global`, `frontends`, `backends`: arrays of IPs or CIDRs. Decision strips these trusted hops from X‑Forwarded‑For when resolving the client IP.
+  - `rules` (array, ordered)
+    - Each rule has: `name` (string), optional `protocols` (array of `http`), optional `frontends` and/or `backends` scope arrays, a `match` object, an obligatory `return` map, and optional `fallback: true`.
+
+- Match object (all fields are optional; multiple values within a field are OR’ed; multiple fields are AND’ed)
+  - `country`: list of ISO 3166‑1 alpha‑2 codes (case‑insensitive).
+  - `asn`: list of ASNs (integers).
+  - `cidr`: list of IPv4/IPv6 CIDR blocks; matches when client IP is within any network.
+  - `method`: list of HTTP methods (case‑insensitive).
+  - `host`: list of host matchers. Plain strings are exact matches; values containing regex tokens are treated as regex and compiled. Matching is case‑insensitive for exact values and regex‑dependent otherwise.
+  - `path`: list of regular expressions matched against the URL path (no scheme/host/query). Example: `^/static/`.
+  - `query`: list of regular expressions matched against the raw query string (without the leading `?`). Example: `(^|&)token=[^&]+(&|$)`. Internally these are compiled as QueryRegex.
+  - `user_agent`: list of regular expressions matched against the User‑Agent header.
+  - `xff`: list of regular expressions matched against the entire X‑Forwarded‑For header after trusted stripping.
+  - `sni`: list of regular expressions matched against the TLS SNI (when provided via SPOE).
+  - `ja3`: list of regular expressions matched against the JA3/TLS fingerprint (when provided via SPOE).
+  - `protocol`: shorthand to constrain a rule by protocol; equivalent to `protocols` when only one value is present. Today only `http` is meaningful.
+
+- Return map
+  - `reason` (string): optional human‑readable reason. If omitted, the fallback reason applies (default `"default-policy"`).
+  - Any other key/value is returned to HAProxy as a variable. With `option var-prefix decision` in SPOE, HAProxy sees them as `var(txn.decision.<key>)`.
+  - Precedence/locking: evaluation is ordered. When a rule sets a variable, that key is locked and later rules cannot override it. The fallback section only fills keys that were not set by any rule.
+
+- Fallback rule
+  - Exactly one rule may set `fallback: true`. Its `return` map is applied after all rules to fill missing keys and/or set a final `reason`.
+  - If you omit the fallback rule, the agent injects an implicit fallback with `reason: default-policy`.
+
+Notes on session‑driven inputs
+- Decision exposes rich session counters and Cookie‑Guard signals to HAProxy and to logs/metrics:
+  - Public session (available as `var(txn.decision.session.public.*)` in HAProxy; also printed under `public={...}` in debug logs): `key`, `key_source`, `req_count`, `recent_hits`, `rate`, `rate_window_seconds`, `idle_seconds`, `first_path`, `first_path_deep`.
+  - Special session (trusted profile): `session.special.role`, `session.special.groups`, `session.special.idle_seconds`.
+  - Cookie‑Guard: `cookieguard.valid` (bool), `cookieguard.age_seconds` (float), `cookieguard.challenge_level` (string).
+- These inputs are not yet first‑class match fields in `policy.yml`. If you need enforcement based on them today, use HAProxy ACLs directly, e.g.:
+  - `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`
+  - `http-request set-var(txn.decision.challenge_mode) str(heavy) if { var(txn.decision.cookieguard.age_seconds) lt 2 }`
+  Future versions may add YAML `match` clauses for these counters; for now they’re meant for visibility and HAProxy‑side ACLs.
+
+Examples
+- Match on query parameter value and set a reason without changing other defaults:
+  ```yaml
+  - name: token-param
+    match:
+      query: ['(^|&)token=[A-Za-z0-9_-]{20,}(&|$)']
+    return:
+      reason: has-token
+  ```
+- Constrain by JA3 and SNI (requires passing `ja3` and `ssl_sni` in the SPOE message):
+  ```yaml
+  - name: tls-fingerprint
+    match:
+      sni: ['^api\\.example\\.com$']
+      ja3: ['^771,4865']
+    return:
+      use_challenge: false
+      reason: trusted-tls
+  ```
 
 ## Trusted context (context.yml)
 
