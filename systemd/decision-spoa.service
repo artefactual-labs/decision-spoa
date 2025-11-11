@@ -8,6 +8,7 @@ Wants=network-online.target
 EnvironmentFile=-/etc/default/decision-spoa
 Type=simple
 ExecStart=/usr/local/bin/decision-spoa $DECISION_SPOA_OPTS
+ExecReload=/bin/kill -HUP $MAINPID
 
 User=haproxy
 Group=haproxy

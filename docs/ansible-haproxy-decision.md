@@ -26,46 +26,23 @@ Use this guide alongside those files to follow every line with a narrative expla
 
 ## 2. High-Level Architecture
 
-```
-                 Internet Clients
-                        |
-                        v
-         +-------------------------------+
-         | Reverse Proxy (192.0.2.10)    |
-         | - Terminates public TLS       |
-         | - Adds X-Forwarded-For header |
-         +-------------------------------+
-                        |
-                        v
-         +----------------------------------------------+
-         | HAProxy (192.0.2.20)                         |
-         | 1. Decision SPOA (policy engine)             |
-         | 2. Coraza SPOA (WAF)                         |
-         | 3. Cookie Guard SPOA (JS challenge)          |
-         | 4. Routing to varnish/origin/certbot         |
-         +----------------------------------------------+
-              |                               |
-              |                               |
- +---------------------------+   +---------------------------+
- | HAProxy backend varnish   |   | HAProxy backend           |
- | (routes through Varnish)  |   | app_backend               |
- +---------------------------+   | (direct to origin)        |
-             |                   +---------------------------+
-             |                                              |                      
-  +----------------------------------------------+           |
-  | Varnish cache (127.0.0.1:6081)               |           |
-  |  - Serves cached responses                   |           |
-  |  - Cache miss → Origin nginx (127.0.0.1:80)  |           |
-  +----------------------------------------------+           |
-             |                                              |
-             +------------------------------+---------------+
-                                            |
-       +--------------------------------------------+
-       | Origin nginx (127.0.0.1:80)                |
-       |  - Hosts the AtoM application              |
-       |  - Serves direct HAProxy traffic and       |
-       |    cache misses from Varnish               |
-       +--------------------------------------------+
+```mermaid
+flowchart TB
+    C[Internet Clients]
+    RP[Reverse Proxy\n192.0.2.10\nTLS termination\nAdds X-Forwarded-For]
+    subgraph HAProxy[HAProxy 192.0.2.20]
+        D[Decision SPOA\nPolicy engine]
+        W[Coraza SPOA\nWAF]
+        G[Cookie Guard SPOA\nJS challenge]
+        R[Routing\nvarnish/origin/certbot]
+    end
+    V[HAProxy backend varnish\n→ Varnish cache 127.0.0.1:6081]
+    O[HAProxy backend app_backend\n→ Origin nginx 127.0.0.1:80]
+
+    C --> RP --> D --> W --> G --> R
+    R --> V
+    R --> O
+    V --> O
 ```
 
 Key idea: every request is evaluated by Decision, optionally challenged by Cookie Guard, optionally inspected by Coraza, and finally routed either through Varnish (for speed) or directly to the origin (for accuracy). Trusted internal flows bypass protections automatically.

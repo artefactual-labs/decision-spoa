@@ -5,6 +5,56 @@
 - Policy decisions are determined by backend/frontend defaults plus rule evaluations in `internal/policy`.
 - GeoIP lookups rely on the MaxMind City and ASN databases and can be hot-reloaded with `SIGHUP`.
 - Prometheus metrics report policy outcomes, rule hits, and GeoIP lookup telemetry.
+- Session tracking keeps lightweight “public” stats for every client plus a “special” table populated from backend headers/cookies defined in `context.yml`; additional Prometheus metrics expose trust hints, table occupancy, and Cookie Guard token age distributions.
+
+### Public-Session Tracking (What req/hits/rate mean)
+
+Decision maintains an in‑memory "public" session entry keyed by a durable identifier and exposes several fields back to HAProxy via `var(txn.decision.*)` and to the logs when `--debug` is enabled:
+
+- `session.public.key`: opaque hash used as the session identifier. Source precedence:
+  - `cookieguard_session` → `hb_v3` → `hb_v2` → fallback `ua_ip` (derived client IP + User‑Agent).
+- `session.public.key_source`: which source was used (`cookieguard_session`, `hb_v3`, `hb_v2`, or `ua_ip`).
+- `session.public.req_count` (logged as `req`): total requests observed for this key since the Decision process started (or until the key is evicted by LRU).
+- `session.public.recent_hits` (logged as `hits`): requests for this key within the rolling window.
+- `session.public.rate_window_seconds`: size of the rolling window in seconds.
+- `session.public.rate` (logged as `rate`): per‑second rate over the rolling window, computed as `recent_hits / rate_window_seconds`. For per‑minute, multiply by 60.
+- `session.public.idle_seconds`: time since this key last appeared.
+- `session.public.first_path` + `first_path_deep`: first path seen for the key and a boolean indicating whether it looks like a "deep" path.
+
+Configuration knobs:
+
+- Window and capacity
+  - `--session-public-window` (env `DECISION_SESSION_PUBLIC_WINDOW`) controls the rolling window; default `1m`, often set to `5m`.
+  - `--session-public-max` (env `DECISION_SESSION_PUBLIC_MAX`) caps the number of public entries; LRU eviction applies when exceeded.
+- Metrics
+  - Prometheus gauges/counters include `decision_session_public_entries`, `decision_session_public_evictions_total`, and `decision_session_key_source_total{source="ua_ip|hb_v2|hb_v3|cookieguard_session"}` to monitor table pressure and the mix of key sources.
+
+Notes:
+
+- Counts are per Decision process. They reset on restart and when a key is evicted by LRU.
+- If you call Decision in both the frontend and a backend, the same request will be recorded twice; for backend‑only counting, run the session tracking only on the backend call (or remove the frontend decide_request).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client Browser
+    participant H as HAProxy Frontend
+    participant D as Decision SPOA
+    participant CC as Challenge Controller
+    participant CG as Cookie Guard
+    participant B as Backend/App
+
+    C->>H: HTTPS request
+    H->>D: SPOE decide_request (headers, cookies, JA3, Cookie Guard vars)
+    D-->>H: policy vars + session.public/special hints
+    H->>CC: JS challenge orchestration (issue/beacon/complete)
+    H->>CG: Cookie Guard verify/issue hb_v3
+    H->>B: Forward request when policy allows
+    B-->>H: Response + Set-Cookie / headers
+    H->>D: SPOE decide_response (res.hdrs + Set-Cookie allowlist)
+    D-->>H: Updated trust bindings, edge_trust hints, metrics
+    H-->>C: Response with optional new cookies/headers
+```
 
 ## Binaries
 
@@ -63,11 +113,15 @@ The Debian/RPM packages install a `decision-spoa.service` systemd unit that uses
 | `--debug` | `DECISION_DEBUG` | disabled | Enables verbose policy logs (see below). |
 | `--metrics-host-label` | `DECISION_METRICS_HOST_LABEL` | disabled | Adds the `host` label to metrics (higher cardinality). |
 | `--metrics-geoip` | `DECISION_METRICS_GEOIP` | disabled | Exports GeoIP metrics (`decision_policy_geo_lookups_total`, country, ASN counters). |
+| `--metrics-challenge-level` | `DECISION_METRICS_CHALLENGE_LEVEL` | disabled | Emits `decision_challenge_level_asn_total` (per-ASN challenge level counts); leave off unless troubleshooting. |
 | `--city-db` | `GEOIP_CITY_DB` | `/var/lib/GeoIP/GeoLite2-City.mmdb` | Path to City database. Optional but enables country lookups. |
 | `--asn-db` | `GEOIP_ASN_DB` | `/var/lib/GeoIP/GeoLite2-ASN.mmdb` | Path to ASN database. |
 | `--city-url` | `GEOIP_CITY_URL` | empty | Download URL consumed by the update helper. |
 | `--asn-url` | `GEOIP_ASN_URL` | empty | Download URL consumed by the update helper. |
 | `--best-effort` | n/a | `true` | Ignore GeoIP download errors when set. |
+| `--session-public-max` | `DECISION_SESSION_PUBLIC_MAX` | `200000` | Maximum entries tracked in the public (all-clients) session table. |
+| `--session-public-window` | `DECISION_SESSION_PUBLIC_WINDOW` | `1m` | Sliding window used to compute the short-term request rate per public session. |
+| `--session-special-max` | `DECISION_SESSION_SPECIAL_MAX` | `50000` | Maximum entries tracked in the special (trusted) session table. |
 
 Send `SIGHUP` to the running process to reload the policy configuration and reopen the GeoIP databases without interrupting HAProxy connections.
 
@@ -125,28 +179,63 @@ After editing either file, run `systemctl restart decision-spoa` or trigger the 
 
 ### HAProxy integration
 
-Configure HAProxy to send the fields expected by the agent (`src`, `xff`, `ua`, `host`, `path`, `method`, `query`, `backend`, `frontend`, and optionally `ssl_sni`, `ja3`, `protocol`) via SPOE messages and consume the returned variables. For accurate logging and Prometheus labels, avoid overriding the `backend` variable inside your HAProxy frontend definitions—let the agent receive an empty `backend` when traffic originates from a frontend so it can classify the request as `component_type="frontend"` automatically.
+Decision now consumes two SPOE groups: a request group that gathers the usual client metadata plus Cookie Guard outputs, and a response group that ships backend headers/cookies so the session brain can learn which browsers are trusted. Configure your frontends so Decision still runs first, followed by the JavaScript challenge controller and Cookie Guard:
 
 ```haproxy
-spoe-agent decision-spoa
-    messages policy-eval
-    option var-prefix policy
-    use-backend policy-servers if TRUE
-
-spoe-message policy-eval
-    args \
-        ip=src \
-        method=method \
-        path=path \
-        query=query \
-        hdr_host=hdr(host) \
-        hdr_ua=hdr(User-Agent) \
-        xff=hdr(X-Forwarded-For) \
-        ssl_sni=ssl_fc_sni \
-        ja3=req.fhdr(ssl_fc_ja3_hash)  # optional; requires JA3 support in your build
+frontend fe_proxy
+    http-request set-var(txn.decision_frontend) fe_proxy
+    http-request set-var(txn.decision_backend) %[be_id]
+    http-request send-spoe-group decision decide_request
+    http-request use-service lua.challenge-controller if { var(txn.decision.use_challenge) -m bool }
+    http-request set-var(txn.cookieguard.mode) %[var(txn.decision.challenge_mode)]
+    http-request lua.cookie-guard
+    http-response send-spoe-group decision decide_response
 ```
 
-Adapt the example to match your actual frontend/backend architecture and message naming.
+The sample SPOE file mirrors this layout:
+
+```haproxy
+[decision]
+spoe-agent decision
+    option var-prefix decision
+    groups decide_request decide_response
+    option pipelining
+    timeout hello      2s
+    timeout idle       30s
+    timeout processing 1500ms
+    use-backend decision_spoa_backend
+    log global
+
+spoe-message decide_request
+    args src=src \
+         method=method \
+         path=path \
+         query=query \
+         host=hdr(host) \
+         ua=hdr(User-Agent) \
+         xff=hdr(X-Forwarded-For) \
+         ssl_sni=ssl_fc_sni \
+         frontend=var(txn.decision_frontend) \
+         backend=var(txn.decision_backend) \
+         req_cookies=hdr(cookie) \
+         cookieguard_valid=var(txn.cookieguard.valid) \
+         cookieguard_age=var(txn.cookieguard.age_seconds) \
+         cookieguard_level=var(txn.cookieguard.challenge_level) \
+         cookieguard_session=var(txn.cookieguard.session_hmac)
+
+spoe-message decide_response
+    args frontend=var(txn.decision_frontend) \
+         backend=var(txn.decision_backend) \
+         res.hdrs=res.hdrs \
+         session.public.key=var(txn.decision.session.public.key)
+
+spoe-group decide_request
+    messages decide_request
+spoe-group decide_response
+    messages decide_response
+```
+
+`res.hdrs` forwards the full response header block, letting Decision’s allowlist in `context.yml` pick the signals that matter. Operators that prefer a strict allowlist at HAProxy can set variables such as `http-response set-var(txn.decision.hdr.atom_authenticated) res.hdr(Atom-Authenticated)` and replace `res.hdrs=res.hdrs` with those individual vars. The request group must include the Cookie Guard outputs shown above so the public session table can hash on the durable session ID rather than raw IP addresses. Decision returns the hashed `session.public.key`, counts/rates, and `session.special.role` back to HAProxy under `var(txn.decision.*)` for use in ACLs or to forward into the response group.
 
 ## Policy configuration
 
@@ -209,6 +298,98 @@ rules:
 ```
 
 The fallback entry acts as the safety net when no earlier rule matches. It should describe the baseline decision your HAProxy configuration expects (for example, setting a catch-all reason or toggling an audit flag). You may leave the `return` map empty if the defaults already cover everything; the agent still enforces an implicit `"default-policy"` reason. If you omit the fallback altogether, the compiler injects that implicit rule, so keeping one is optional. Retain it when you want to document the “otherwise” path explicitly or to perform conditional work such as setting a reason only for unmatched traffic while allowing earlier rules to keep their own values.
+
+## Trusted context (context.yml)
+
+Session tracking and trusted-role hints are configured separately via `context.yml` in the same directory as `policy.yml`. The file declares which response headers/cookies HAProxy should forward, which session table they feed (`public` vs `special`), and any tags to stamp onto the resulting profile. Tags accept `${value}` (the raw backend value) and `${digest}` (after hashing/HMAC), so you can record roles without exposing the underlying session IDs.
+
+```yaml
+response:
+  mode: allowlist
+  headers:
+    - name: Atom-Authenticated
+      table: special
+      tags:
+        session.role: "${value}"
+    - name: X-Decision-Group
+      table: special
+      tags:
+        session.group: "${value}"
+  cookies:
+    - name: hb_v3
+      table: public
+    - name: edge_trust
+      table: special
+      hash_mode: hmac-sha256
+      tags:
+        session.role: editor
+hash:
+  mode: hmac-sha256
+  secret_file: secrets/edge_hmac.key
+```
+
+Only allowlisted signals are stored even if the SPOE response group forwards every header/cookie. Rotate `secret_file` to change the HMAC key Decision uses before persisting digests; `SIGHUP` reloads both `policy.yml` and `context.yml`.
+
+### Special Sessions (Trusted Table)
+
+The "special" table holds durable trust profiles keyed by a privacy‑safe digest of response signals you allowlist in `context.yml`. Use it to tag authenticated/editor traffic and grant grace (skip heavy challenges, throttle less aggressively) without app changes.
+
+- Keying & hashing
+  - Each allowlisted header/cookie can specify `hash_mode` (`plain`, `sha256`, `sha512`, `hmac-sha256`, `hmac-sha512`).
+  - The digest (never the raw value when HMAC/SHA is used) becomes the special profile key.
+  - Set a global HMAC secret in `hash.secret_file`; SIGHUP to reload.
+
+- Tags
+  - `tags:` apply labels to the profile whenever the signal is seen on a response (via the `decide_response` SPOE group).
+  - Supported convenience keys: `session.role`, `session.group`/`session.groups` (comma‑separated). Any other key is stored as metadata for debugging.
+  - Decision increments `decision_trust_hint_total{hint="role=<value>"}` and `role/group` changes are reflected immediately on the next request that presents the same signal.
+
+- Response vs request semantics
+  - Response path (decide_response): creates/updates the special profile and applies `tags`.
+  - Request path: "touches" (refreshes) existing profiles when the browser presents an allowlisted cookie, exposing:
+    - `session.special.role`, `session.special.groups` and `session.special.idle_seconds` to HAProxy/Policy.
+  - Ensure `http-response send-spoe-group decision decide_response` runs after the backend sets headers/cookies you care about.
+
+- Example: coarse auth flag (same value for everyone)
+  - Minimal mapping; all authenticated users share one profile key (sufficient for coarse hints):
+
+    ```yaml
+    response:
+      mode: allowlist
+      cookies:
+        - name: atom_authenticated
+          table: special
+          tags:
+            session.role: authenticated
+    hash:
+      mode: hmac-sha256
+      secret_file: secrets/edge_hmac.key
+    ```
+
+  - Logout: when the cookie is removed/expired by the app, future requests stop "touching" the profile; `session.special.role` disappears. The old entry idles out and is evicted by LRU.
+
+- Example: per‑session auth (preferable when available)
+  - Map a per‑session cookie (e.g., Symfony’s) with HMAC to avoid collapsing all users into one key:
+
+    ```yaml
+    response:
+      mode: allowlist
+      cookies:
+        - name: symfony
+          table: special
+          hash_mode: hmac-sha256
+          tags:
+            session.role: authenticated   # only if any symfony session implies auth in your setup
+    ```
+
+  - If anonymous sessions also get this cookie, add a second, stricter signal (or app logic) before tagging `session.role`.
+
+- Observability
+  - `decision_session_special_entries` (gauge) and `decision_session_special_evictions_total` track table health.
+  - `decision_trust_hint_total{hint="role=<value>"}` counts role assignments.
+  - With `--debug-verbose`, logs include `special={role=… idle=… groups=…}` on the same line as the request summary.
+
+Tip: keep the response SPOE only in backends to avoid double‑processing `res.hdrs`. Place it after any `http-response add-header`/`set-header` that synthesizes signals for Decision.
 
 ### Rule reference
 

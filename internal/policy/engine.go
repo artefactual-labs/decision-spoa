@@ -6,22 +6,32 @@ import (
 )
 
 type Input struct {
-	Backend          string
-	BackendLabel     string
-	BackendLabelType string
-	Frontend         string
-	Protocol         string
-	XFF              string
-	Method           string
-	Query            string
-	SNI              string
-	JA3              string
-	IP               net.IP
-	ASN              uint
-	Country          string
-	UA               string
-	Host             string
-	Path             string
+	Backend                    string
+	BackendLabel               string
+	BackendLabelType           string
+	Frontend                   string
+	Protocol                   string
+	XFF                        string
+	Method                     string
+	Query                      string
+	SNI                        string
+	JA3                        string
+	IP                         net.IP
+	ASN                        uint
+	Country                    string
+	UA                         string
+	Host                       string
+	Path                       string
+	SessionPublicReqCount      uint64
+	SessionPublicRate          float64
+	SessionPublicFirstPath     string
+	SessionPublicFirstPathDeep bool
+	SessionPublicIdleSeconds   float64
+	SessionSpecialRole         string
+	SessionSpecialIdleSeconds  float64
+	CookieAgeSeconds           float64
+	ChallengeLevel             string
+	CookieGuardValid           bool
 }
 
 type Output struct {

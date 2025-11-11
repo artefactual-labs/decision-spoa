@@ -76,12 +76,26 @@ func collectArgs(msgs *message.Messages) (map[string]string, map[string]string) 
 		"backend",
 		"frontend",
 		"protocol",
+		"req_cookies",
+		"cookieguard_valid",
+		"cookieguard_age",
+		"cookieguard_level",
+		"cookieguard_session",
+		"session.public.key",
+		"res.hdrs",
 	}
 
 	for i := 0; i < msgs.Len(); i++ {
 		m, err := msgs.GetByIndex(i)
 		if err != nil || m == nil || m.KV == nil {
 			continue
+		}
+		if m.Name != "" {
+			key := fmt.Sprintf("spoe.message.%d", i)
+			raw[key] = m.Name
+			if _, ok := raw["spoe.message"]; !ok {
+				raw["spoe.message"] = m.Name
+			}
 		}
 		items := m.KV.Data()
 		for _, item := range items {
