@@ -223,6 +223,27 @@ func (t *trustRuntime) updateSpecialFromCookie(rule contextcfg.SignalRule, value
 	applySignalToSpecial(rule, value, digest, t)
 }
 
+func (t *trustRuntime) addSuspicion(key string, delta int) (int, bool) {
+	if t == nil || key == "" {
+		return 0, false
+	}
+	return t.public.AddSuspicion(key, delta)
+}
+
+func (t *trustRuntime) resetSuspicion(key string) bool {
+	if t == nil || key == "" {
+		return false
+	}
+	return t.public.ResetSuspicion(key)
+}
+
+func (t *trustRuntime) setSuspicionIgnore(key string, ignore bool) bool {
+	if t == nil || key == "" {
+		return false
+	}
+	return t.public.SetSuspicionIgnore(key, ignore)
+}
+
 func specialIdleSeconds(now time.Time, snap session.SpecialSnapshot) float64 {
 	if snap.Key == "" || snap.LastActivity.IsZero() {
 		return 0

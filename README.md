@@ -289,6 +289,8 @@ Each output becomes `var(txn.decision.<name>)` because the SPOE agent uses `opti
 | `rate_bot` | Feed stick-table rate limits: `track-sc0` / `deny` when over threshold. |
 | Custom vars (e.g., `policy.challenge_mode`, `policy.backend`, etc.) | Use in ACLs or to propagate context downstream (`set-header`, `set-var`). |
 | `session.public.key`, `.req_count`, `.rate`, `.idle_seconds`, `.first_path`, `.first_path_deep`, `.recent_hits`, `.rate_window_seconds` | Inspect/limit session behaviour directly in HAProxy (e.g., `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`). |
+| `session.public.suspicious_score` | Decision-managed score that accumulates via `session.suspicious.increment/reset`. Use it to gate ALTCHA re-challenges or hard denies once a threshold is reached. |
+| `session.public.suspicious_ignored` | `true` when the session is marked via `session.suspicious.ignore: true` (no further increments). Helpful for gating rules so trusted bots/networks are exempt. |
 | `session.special.role`, `.groups`, `.idle_seconds` | Trusted user hints (from context.yml). Skip challenges or grant bypass for known roles. |
 | `cookieguard.valid`, `.age_seconds`, `.challenge_level` | Mirror of Cookie Guard telemetry (validity/age/challenge mode). |
 
@@ -392,6 +394,7 @@ This section documents every supported field in `policy.yml` and how matches are
     - `first_path_regex`: array of regexes for the first path seen
     - `first_path_deep`: boolean (true/false)
     - `idle_seconds`: numeric comparator map
+    - `suspicious_score`: numeric comparator map; combine with the increment/reset feature to build tiered responses (e.g., ≥5 → deny)
   - `session_special`: trust profile matches
     - `role`: array of roles (strings)
     - `idle_seconds`: numeric comparator map
@@ -403,6 +406,10 @@ This section documents every supported field in `policy.yml` and how matches are
 - Return map
   - `reason` (string): optional human‑readable reason. If omitted, the fallback reason applies (default `"default-policy"`).
   - Any other key/value is returned to HAProxy as a variable. With `option var-prefix decision` in SPOE, HAProxy sees them as `var(txn.decision.<key>)`.
+  - `session.suspicious.increment`: integer delta applied to Decision’s internal suspicion score for the current session key. Use positive numbers to accumulate penalties; negatives reduce suspicion.
+  - `session.suspicious.reset`: boolean. When true, Decision resets the suspicion score to 0 (useful after the user solves a challenge).
+  - `session.suspicious.ignore`: boolean. When `true`, Decision marks the session as trusted—future `session.suspicious.increment` instructions are ignored and the score is reset to 0. Use `false` to clear the flag and resume scoring.
+  - `stop` (alias `terminal`): boolean. When true, rule evaluation stops immediately after this rule runs—no later rules (or the fallback) are evaluated. Defaults still apply, so terminal rules simply prevent additional overrides while avoiding the overhead of evaluating the rest of the rule set.
   - Precedence/locking: evaluation is ordered. When a rule sets a variable, that key is locked and later rules cannot override it. The fallback section only fills keys that were not set by any rule.
 
 - Fallback rule
@@ -412,6 +419,8 @@ This section documents every supported field in `policy.yml` and how matches are
 Notes on session‑driven inputs
 - Decision exposes rich session counters and Cookie‑Guard signals to HAProxy and to logs/metrics, and they are also matchable under `session_public`, `session_special`, and `cookie_guard`:
   - Public session (available as `var(txn.decision.session.public.*)` in HAProxy; also printed under `public={...}` in debug logs): `key`, `key_source`, `req_count`, `recent_hits`, `rate`, `rate_window_seconds`, `idle_seconds`, `first_path`, `first_path_deep`.
+  - Suspicion score: `session.public.suspicious_score` reflects the accumulated score managed by Decision; use `session.suspicious.increment/reset` to mutate it.
+  - Suspicion ignore flag: `session.public.suspicious_ignored` is `true` after a rule sets `session.suspicious.ignore: true`, preventing future increments for that session.
   - Special session (trusted profile): `session.special.role`, `session.special.groups`, `session.special.idle_seconds`.
   - Cookie‑Guard: `cookieguard.valid` (bool), `cookieguard.age_seconds` (float), `cookieguard.challenge_level` (string).
 Examples using session and Cookie‑Guard matchers
@@ -440,6 +449,35 @@ Examples using session and Cookie‑Guard matchers
       age_seconds: { gt: 2 }
   return:
     reason: cg-fresh
+
+- name: allow-search-bots
+  match:
+    asn: [15169, 8075]
+    user_agent:
+      - '(?i)googlebot'
+      - '(?i)bingbot'
+  return:
+    session.suspicious.ignore: true
+    reason: allow-search-bots
+
+- name: es-query-first-hit
+  match:
+    path: ['^/informationobject/browse$']
+    query: ['(^|&)query=[^&]+(&|$)']
+    session_public:
+      req_count: { eq: 1 }
+  return:
+    session.suspicious.increment: 3
+    use_challenge: true
+    reason: es-query-first-hit
+
+- name: suspicious-level-5
+  match:
+    session_public:
+      suspicious_score: { ge: 5 }
+  return:
+    deny: true
+    reason: suspicious-level-5
 ```
 
 Examples
@@ -485,7 +523,7 @@ The policy engine consumes the following inputs (see `internal/policy/engine.go:
   - `Protocol` → `protocol:` (or `protocols:`) — today only `http` is meaningful; default is `http` if unset.
 
 - Session counters and trust profile (now matchable via nested blocks)
-  - `SessionPublic*` → `match.session_public.{req_count, rate, first_path_regex, first_path_deep, idle_seconds}`.
+  - `SessionPublic*` → `match.session_public.{req_count, rate, first_path_regex, first_path_deep, idle_seconds, suspicious_score}`.
   - `SessionSpecial*` → `match.session_special.{role, idle_seconds}`.
   - You can still enforce via HAProxy ACLs when preferred, e.g. `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`.
 

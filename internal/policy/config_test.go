@@ -3,9 +3,11 @@ package policy
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/artefactual-labs/decision-spoa/internal/xforwarded"
+	"gopkg.in/yaml.v3"
 )
 
 func TestNormalizeTrusted(t *testing.T) {
@@ -155,50 +157,97 @@ func TestCompileRules(t *testing.T) {
 }
 
 func TestCompileExtendedMatchers(t *testing.T) {
-    raw := []RawRule{
-        {
-            Name: "session+cookie",
-            Match: RawRuleMatch{
-                SessionPublic: &RawSessionPublicMatch{
-                    ReqCount:       RawNumberCond{GE: ptrFloat(1)},
-                    Rate:           RawNumberCond{GE: ptrFloat(0)},
-                    FirstPathRegex: []string{`^/`},
-                    FirstPathDeep:  ptrBool(true),
-                    IdleSeconds:    RawNumberCond{LE: ptrFloat(3600)},
-                },
-                SessionSpecial: &RawSessionSpecialMatch{
-                    Role:        []string{"authenticated"},
-                    IdleSeconds: RawNumberCond{LT: ptrFloat(60)},
-                },
-                CookieGuard: &RawCookieGuardMatch{
-                    Valid:          ptrBool(true),
-                    AgeSeconds:     RawNumberCond{GT: ptrFloat(1.5)},
-                    ChallengeLevel: []string{"heavy"},
-                },
-            },
-            Return: map[string]interface{}{"policy.bucket": "ok"},
-        },
-        {Name: "fallback", Fallback: true, Return: map[string]interface{}{"reason": "fb"}},
-    }
+	raw := []RawRule{
+		{
+			Name: "session+cookie",
+			Match: RawRuleMatch{
+				SessionPublic: &RawSessionPublicMatch{
+					ReqCount:          RawNumberCond{GE: ptrFloat(1)},
+					Rate:              RawNumberCond{GE: ptrFloat(0)},
+					FirstPathRegex:    []string{`^/`},
+					FirstPathDeep:     ptrBool(true),
+					IdleSeconds:       RawNumberCond{LE: ptrFloat(3600)},
+					SuspiciousScore:   RawNumberCond{GE: ptrFloat(5)},
+					SuspiciousIgnored: ptrBool(false),
+				},
+				SessionSpecial: &RawSessionSpecialMatch{
+					Role:        []string{"authenticated"},
+					IdleSeconds: RawNumberCond{LT: ptrFloat(60)},
+				},
+				CookieGuard: &RawCookieGuardMatch{
+					Valid:          ptrBool(true),
+					AgeSeconds:     RawNumberCond{GT: ptrFloat(1.5)},
+					ChallengeLevel: []string{"heavy"},
+				},
+			},
+			Return: map[string]interface{}{"policy.bucket": "ok"},
+		},
+		{Name: "fallback", Fallback: true, Return: map[string]interface{}{"reason": "fb"}},
+	}
 
-    rules, _, err := compileRules(raw)
-    if err != nil {
-        t.Fatalf("compileRules error: %v", err)
-    }
-    if len(rules) != 1 {
-        t.Fatalf("expected 1 compiled rule, got %d", len(rules))
-    }
-    r := rules[0]
-    if len(r.Match.SessionPublic.FirstPathRegex) != 1 {
-        t.Fatalf("first_path_regex not compiled")
-    }
-    if r.Match.SessionPublic.FirstPathDeep == nil || *r.Match.SessionPublic.FirstPathDeep != true {
-        t.Fatalf("first_path_deep missing")
-    }
-    if _, ok := r.Return.Vars["policy.bucket"]; !ok {
-        t.Fatalf("return var missing")
-    }
+	rules, _, err := compileRules(raw)
+	if err != nil {
+		t.Fatalf("compileRules error: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+	}
+	r := rules[0]
+	if len(r.Match.SessionPublic.FirstPathRegex) != 1 {
+		t.Fatalf("first_path_regex not compiled")
+	}
+	if r.Match.SessionPublic.FirstPathDeep == nil || *r.Match.SessionPublic.FirstPathDeep != true {
+		t.Fatalf("first_path_deep missing")
+	}
+	if !r.Match.SessionPublic.SuspiciousScore.matches(5) {
+		t.Fatalf("suspicious_score matcher missing")
+	}
+	if r.Match.SessionPublic.SuspiciousIgnored == nil || *r.Match.SessionPublic.SuspiciousIgnored != false {
+		t.Fatalf("suspicious_ignored matcher missing")
+	}
+	if _, ok := r.Return.Vars["policy.bucket"]; !ok {
+		t.Fatalf("return var missing")
+	}
+}
+
+func TestNormalizeReturnSuspicion(t *testing.T) {
+	ret, err := normalizeReturn(map[string]interface{}{
+		"session.suspicious.increment": 3,
+		"session.suspicious.reset":     true,
+		"session.suspicious.ignore":    true,
+		"stop":                          true,
+		"policy.bucket":                "x",
+	}, "rule")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ret.SuspicionDelta != 3 || !ret.SuspicionReset || !ret.SuspicionIgnoreSet || !ret.SuspicionIgnore || !ret.Terminal {
+		t.Fatalf("unexpected suspicion fields: %+v", ret)
+	}
+	if ret.Vars["policy.bucket"] != "x" {
+		t.Fatalf("vars missing")
+	}
+}
+
+
+func TestRuleUnknownTopLevelKey(t *testing.T) {
+	// Manually inject unknown key by decoding YAML snippet.
+	yamlData := `
+rules:
+  - name: bad
+    terminal: true
+    return:
+      policy.bucket: ok
+`
+	var rc RawConfig
+	err := yaml.Unmarshal([]byte(yamlData), &rc)
+	if err == nil {
+		t.Fatalf("expected error for unknown top-level key")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func ptrFloat(v float64) *float64 { return &v }
-func ptrBool(v bool) *bool       { return &v }
+func ptrBool(v bool) *bool        { return &v }

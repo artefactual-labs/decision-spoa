@@ -6,37 +6,67 @@ import (
 )
 
 type Input struct {
-	Backend                    string
-	BackendLabel               string
-	BackendLabelType           string
-	Frontend                   string
-	Protocol                   string
-	XFF                        string
-	Method                     string
-	Query                      string
-	SNI                        string
-	JA3                        string
-	IP                         net.IP
-	ASN                        uint
-	Country                    string
-	UA                         string
-	Host                       string
-	Path                       string
-	SessionPublicReqCount      uint64
-	SessionPublicRate          float64
-	SessionPublicFirstPath     string
-	SessionPublicFirstPathDeep bool
-	SessionPublicIdleSeconds   float64
-	SessionSpecialRole         string
-	SessionSpecialIdleSeconds  float64
-	CookieAgeSeconds           float64
-	ChallengeLevel             string
-	CookieGuardValid           bool
+	Backend                        string
+	BackendLabel                   string
+	BackendLabelType               string
+	Frontend                       string
+	Protocol                       string
+	XFF                            string
+	Method                         string
+	Query                          string
+	SNI                            string
+	JA3                            string
+	IP                             net.IP
+	ASN                            uint
+	Country                        string
+	UA                             string
+	Host                           string
+	Path                           string
+	SessionPublicReqCount          uint64
+	SessionPublicRate              float64
+	SessionPublicFirstPath         string
+	SessionPublicFirstPathDeep     bool
+	SessionPublicIdleSeconds       float64
+	SessionPublicSuspiciousScore   int
+	SessionPublicSuspiciousIgnored bool
+	SessionSpecialRole             string
+	SessionSpecialIdleSeconds      float64
+	CookieAgeSeconds               float64
+	ChallengeLevel                 string
+	CookieGuardValid               bool
 }
 
 type Output struct {
-	Vars   Vars
-	Reason string
+	Vars               Vars
+	Reason             string
+	SuspicionDelta     int
+	SuspicionReset     bool
+	SuspicionIgnoreSet bool
+	SuspicionIgnore    bool
+}
+
+func ruleHasEffect(rule Rule, locked map[string]struct{}, reasonSet bool) bool {
+	if rule.Return.Reason != "" && !reasonSet {
+		return true
+	}
+	for k := range rule.Return.Vars {
+		if _, ok := locked[k]; !ok {
+			return true
+		}
+	}
+	if rule.Return.SuspicionDelta != 0 {
+		return true
+	}
+	if rule.Return.SuspicionReset {
+		return true
+	}
+	if rule.Return.SuspicionIgnoreSet {
+		return true
+	}
+	if rule.Return.Terminal {
+		return true
+	}
+	return false
 }
 
 // RuleHitCounter records rule hits for observability.
@@ -84,8 +114,12 @@ func (c Config) Evaluate(in Input, ruleHits RuleHitCounter, withHostLabel bool) 
 		}
 	}
 
+	stopped := false
 	rules := c.RulesForProtocol(strings.ToLower(in.Protocol))
 	for _, rule := range rules {
+		if !ruleHasEffect(rule, locked, out.Reason != "") {
+			continue
+		}
 		if !scopeMatches(rule, in) {
 			continue
 		}
@@ -93,18 +127,38 @@ func (c Config) Evaluate(in Input, ruleHits RuleHitCounter, withHostLabel bool) 
 			continue
 		}
 
-		if changed := applyReturn(&out, rule.Return, locked, true); !changed {
+		changed := applyReturn(&out, rule.Return, locked, true)
+		if rule.Return.SuspicionReset {
+			out.SuspicionReset = true
+			changed = true
+		}
+		if rule.Return.SuspicionDelta != 0 {
+			out.SuspicionDelta += rule.Return.SuspicionDelta
+			changed = true
+		}
+		if rule.Return.SuspicionIgnoreSet {
+			out.SuspicionIgnoreSet = true
+			out.SuspicionIgnore = rule.Return.SuspicionIgnore
+			changed = true
+		}
+		if !changed {
 			continue
 		}
 		hit(rule.Name)
+		if rule.Return.Terminal {
+			stopped = true
+			break
+		}
 	}
 
-	// Fallback: apply explicit overrides
-	applyReturn(&out, c.Fallback, locked, false)
-	if out.Reason == "" {
-		out.Reason = c.Fallback.Reason
+	// Fallback: apply explicit overrides (unless terminal rule already fired)
+	if !stopped {
+		applyReturn(&out, c.Fallback, locked, false)
 		if out.Reason == "" {
-			out.Reason = "default-policy"
+			out.Reason = c.Fallback.Reason
+			if out.Reason == "" {
+				out.Reason = "default-policy"
+			}
 		}
 	}
 
@@ -283,6 +337,14 @@ func conditionsMatch(match RuleMatch, in Input) bool {
 	}
 	if !match.SessionPublic.IdleSeconds.matches(in.SessionPublicIdleSeconds) {
 		return false
+	}
+	if !match.SessionPublic.SuspiciousScore.matches(float64(in.SessionPublicSuspiciousScore)) {
+		return false
+	}
+	if match.SessionPublic.SuspiciousIgnored != nil {
+		if in.SessionPublicSuspiciousIgnored != *match.SessionPublic.SuspiciousIgnored {
+			return false
+		}
 	}
 
 	// Extended session_special

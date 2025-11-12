@@ -522,32 +522,34 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 	}
 
 	input := policy.Input{
-		Backend:                    backend,
-		BackendLabel:               componentLabel,
-		BackendLabelType:           componentType,
-		Frontend:                   frontend,
-		Protocol:                   protocol,
-		XFF:                        xff,
-		Method:                     method,
-		Query:                      query,
-		SNI:                        sni,
-		JA3:                        ja3,
-		IP:                         ip,
-		ASN:                        asn,
-		Country:                    country,
-		UA:                         ua,
-		Host:                       host,
-		Path:                       path,
-		SessionPublicReqCount:      publicSnapshot.RequestCount,
-		SessionPublicRate:          publicRate,
-		SessionPublicFirstPath:     publicSnapshot.FirstPath,
-		SessionPublicFirstPathDeep: firstPathDeep,
-		SessionPublicIdleSeconds:   publicIdle,
-		SessionSpecialRole:         specialSnapshot.Role,
-		SessionSpecialIdleSeconds:  specialIdle,
-		CookieAgeSeconds:           cookieAgeSeconds,
-		ChallengeLevel:             challengeLevel,
-		CookieGuardValid:           cookieGuardValid,
+		Backend:                        backend,
+		BackendLabel:                   componentLabel,
+		BackendLabelType:               componentType,
+		Frontend:                       frontend,
+		Protocol:                       protocol,
+		XFF:                            xff,
+		Method:                         method,
+		Query:                          query,
+		SNI:                            sni,
+		JA3:                            ja3,
+		IP:                             ip,
+		ASN:                            asn,
+		Country:                        country,
+		UA:                             ua,
+		Host:                           host,
+		Path:                           path,
+		SessionPublicReqCount:          publicSnapshot.RequestCount,
+		SessionPublicRate:              publicRate,
+		SessionPublicFirstPath:         publicSnapshot.FirstPath,
+		SessionPublicFirstPathDeep:     firstPathDeep,
+		SessionPublicIdleSeconds:       publicIdle,
+		SessionPublicSuspiciousScore:   publicSnapshot.SuspiciousScore,
+		SessionPublicSuspiciousIgnored: publicSnapshot.SuspiciousIgnored,
+		SessionSpecialRole:             specialSnapshot.Role,
+		SessionSpecialIdleSeconds:      specialIdle,
+		CookieAgeSeconds:               cookieAgeSeconds,
+		ChallengeLevel:                 challengeLevel,
+		CookieGuardValid:               cookieGuardValid,
 	}
 
 	out := cfg.Evaluate(input, promRuleCounter{CounterVec: decisionRulesHitTotal}, metricsHostLabel)
@@ -564,6 +566,27 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 	}
 	bucketLabel := labelValue(out.Vars["policy.bucket"])
 	decisionDecisionsTotal.WithLabelValues(componentType, componentLabel, labelHost, bucketLabel, out.Reason).Inc()
+
+	if publicSnapshot.Key != "" && trust != nil {
+		if out.SuspicionIgnoreSet {
+			if trust.setSuspicionIgnore(publicSnapshot.Key, out.SuspicionIgnore) {
+				publicSnapshot.SuspiciousIgnored = out.SuspicionIgnore
+				if out.SuspicionIgnore {
+					publicSnapshot.SuspiciousScore = 0
+				}
+			}
+		}
+		if out.SuspicionReset {
+			if trust.resetSuspicion(publicSnapshot.Key) {
+				publicSnapshot.SuspiciousScore = 0
+			}
+		}
+		if out.SuspicionDelta != 0 {
+			if score, ok := trust.addSuspicion(publicSnapshot.Key, out.SuspicionDelta); ok {
+				publicSnapshot.SuspiciousScore = score
+			}
+		}
+	}
 
 	resp := make(map[string]interface{}, len(out.Vars)+8)
 	for k, v := range out.Vars {
@@ -585,6 +608,8 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 		setResp(resp, "session.public.first_path_deep", firstPathDeep)
 		setResp(resp, "session.public.idle_seconds", publicIdle)
 		setResp(resp, "session.public.rate_window_seconds", publicSnapshot.RecentWindowSec)
+		setResp(resp, "session.public.suspicious_score", publicSnapshot.SuspiciousScore)
+		setResp(resp, "session.public.suspicious_ignored", publicSnapshot.SuspiciousIgnored)
 	}
 	if specialSnapshot.Key != "" {
 		setResp(resp, "session.special.role", specialSnapshot.Role)
@@ -602,9 +627,9 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 			entries := trusted.Entries()
 			hb2 := cookies["hb_v2"] != ""
 			hb3 := cookies["hb_v3"] != ""
-			log.Printf("policy-verbose: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s m=%s host=%s path=%s query=%q sni=%s ja3=%s hb2=%t hb3=%t key_src=%s public={key=%s req=%d hits=%d rate=%.6f idle=%.3f first_path=%s deep=%t} special={role=%s idle=%.3f groups=%s} reason=%s bucket=%s elapsed=%.6f ua=%q vars=%v",
+			log.Printf("policy-verbose: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s m=%s host=%s path=%s query=%q sni=%s ja3=%s hb2=%t hb3=%t key_src=%s public={key=%s req=%d hits=%d rate=%.6f idle=%.3f first_path=%s deep=%t sus=%d ignore=%t} special={role=%s idle=%.3f groups=%s} reason=%s bucket=%s elapsed=%.6f ua=%q vars=%v",
 				sortedRaw(raw), frontend, backend, src, xff, ip, xffUsed, strippedHops, pt, entries, asn, country, strings.ToUpper(method), host, truncatePath(path, 200), query, sni, ja3, hb2, hb3, keySource,
-				publicSnapshot.Key, publicSnapshot.RequestCount, publicSnapshot.RecentHits, publicRate, publicIdle, publicSnapshot.FirstPath, firstPathDeep,
+				publicSnapshot.Key, publicSnapshot.RequestCount, publicSnapshot.RecentHits, publicRate, publicIdle, publicSnapshot.FirstPath, firstPathDeep, publicSnapshot.SuspiciousScore, publicSnapshot.SuspiciousIgnored,
 				specialSnapshot.Role, specialIdle, strings.Join(specialSnapshot.Groups, ","), out.Reason, bucketLabel, elapsed, ua, resp)
 		}
 
@@ -612,9 +637,9 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 		hb2 := cookies["hb_v2"] != ""
 		hb3 := cookies["hb_v3"] != ""
 		useCh := labelValue(out.Vars["use_challenge"]) // may be "unset" if not provided
-		log.Printf("policy: fe=%s be=%s ip=%s asn=%d c=%s m=%s host=%s path=%s bucket=%s reason=%s use_ch=%s hb2=%t hb3=%t key_src=%s key=%s req=%d hits=%d rate=%.6f xff_used=%t stripped=%d ua=%q",
+		log.Printf("policy: fe=%s be=%s ip=%s asn=%d c=%s m=%s host=%s path=%s bucket=%s reason=%s use_ch=%s hb2=%t hb3=%t key_src=%s key=%s req=%d hits=%d rate=%.6f sus=%d ignore=%t xff_used=%t stripped=%d ua=%q",
 			frontend, backend, safeIP(ip), asn, country, strings.ToUpper(method), host, truncatePath(path, 120),
-			bucketLabel, out.Reason, useCh, hb2, hb3, keySource, publicSnapshot.Key, publicSnapshot.RequestCount, publicSnapshot.RecentHits, publicRate, xffUsed, strippedHops, ua)
+			bucketLabel, out.Reason, useCh, hb2, hb3, keySource, publicSnapshot.Key, publicSnapshot.RequestCount, publicSnapshot.RecentHits, publicRate, publicSnapshot.SuspiciousScore, publicSnapshot.SuspiciousIgnored, xffUsed, strippedHops, ua)
 	}
 
 	return resp, nil

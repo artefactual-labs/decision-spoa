@@ -11,13 +11,15 @@ import (
 // seconds to keep the structure JSON/SPoe friendly when we eventually expose
 // it to HAProxy.
 type PublicSnapshot struct {
-	Key             string
-	FirstSeen       time.Time
-	LastSeen        time.Time
-	FirstPath       string
-	RequestCount    uint64
-	RecentWindowSec float64
-	RecentHits      int
+	Key               string
+	FirstSeen         time.Time
+	LastSeen          time.Time
+	FirstPath         string
+	RequestCount      uint64
+	RecentWindowSec   float64
+	RecentHits        int
+	SuspiciousScore   int
+	SuspiciousIgnored bool
 }
 
 // PublicTable tracks short-lived public sessions derived from hashed
@@ -42,12 +44,14 @@ type publicEntry struct {
 
 // PublicRecord stores mutable state for a public session.
 type PublicRecord struct {
-	Key          string
-	FirstSeen    time.Time
-	LastSeen     time.Time
-	FirstPath    string
-	RequestCount uint64
-	recent       []time.Time
+	Key               string
+	FirstSeen         time.Time
+	LastSeen          time.Time
+	FirstPath         string
+	RequestCount      uint64
+	recent            []time.Time
+	SuspiciousScore   int
+	SuspiciousIgnored bool
 }
 
 // NewPublicTable creates a new LRU-backed public session table. rateWindow
@@ -142,14 +146,65 @@ func snapshotFromRecord(rec *PublicRecord, window time.Duration) PublicSnapshot 
 	recent := pruneRecent(rec.recent, rec.LastSeen.Add(-window))
 	rec.recent = recent
 	return PublicSnapshot{
-		Key:             rec.Key,
-		FirstSeen:       rec.FirstSeen,
-		LastSeen:        rec.LastSeen,
-		FirstPath:       rec.FirstPath,
-		RequestCount:    rec.RequestCount,
-		RecentWindowSec: window.Seconds(),
-		RecentHits:      len(recent),
+		Key:               rec.Key,
+		FirstSeen:         rec.FirstSeen,
+		LastSeen:          rec.LastSeen,
+		FirstPath:         rec.FirstPath,
+		RequestCount:      rec.RequestCount,
+		RecentWindowSec:   window.Seconds(),
+		RecentHits:        len(recent),
+		SuspiciousScore:   rec.SuspiciousScore,
+		SuspiciousIgnored: rec.SuspiciousIgnored,
 	}
+}
+
+// AddSuspicion adjusts the per-session suspicious score by delta. It returns
+// the updated score and whether the session existed.
+func (t *PublicTable) AddSuspicion(key string, delta int) (int, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	el, ok := t.entries[key]
+	if !ok {
+		return 0, false
+	}
+	rec := el.Value.(*publicEntry).Record
+	if rec.SuspiciousIgnored {
+		return rec.SuspiciousScore, true
+	}
+	rec.SuspiciousScore += delta
+	if rec.SuspiciousScore < 0 {
+		rec.SuspiciousScore = 0
+	}
+	return rec.SuspiciousScore, true
+}
+
+// ResetSuspicion clears the suspicious score for the session key if present.
+func (t *PublicTable) ResetSuspicion(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	el, ok := t.entries[key]
+	if !ok {
+		return false
+	}
+	rec := el.Value.(*publicEntry).Record
+	rec.SuspiciousScore = 0
+	return true
+}
+
+// SetSuspicionIgnore toggles whether the session should skip suspicion increments.
+func (t *PublicTable) SetSuspicionIgnore(key string, ignore bool) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	el, ok := t.entries[key]
+	if !ok {
+		return false
+	}
+	rec := el.Value.(*publicEntry).Record
+	rec.SuspiciousIgnored = ignore
+	if ignore {
+		rec.SuspiciousScore = 0
+	}
+	return true
 }
 
 func pruneRecent(all []time.Time, cutoff time.Time) []time.Time {
