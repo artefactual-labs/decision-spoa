@@ -1,17 +1,18 @@
 package policy
 
 import (
-    "fmt"
-    "net"
-    "os"
-    "path/filepath"
-    "regexp"
-    "sort"
-    "strings"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 
-    "github.com/artefactual-labs/decision-spoa/internal/xforwarded"
+	"github.com/artefactual-labs/decision-spoa/internal/xforwarded"
 
-    "gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v3"
 )
 
 // Vars is a generic bag of variables the policy will return to HAProxy.
@@ -45,27 +46,65 @@ type RawRule struct {
 	Match     RawRuleMatch           `yaml:"match"`
 	Return    map[string]interface{} `yaml:"return"`
 	Fallback  bool                   `yaml:"fallback"`
+	unknownKeys []string             `yaml:"-"`
+}
+
+func (r *RawRule) UnmarshalYAML(value *yaml.Node) error {
+	type alias RawRule
+	var aux alias
+	if err := value.Decode(&aux); err != nil {
+		return err
+	}
+	*r = RawRule(aux)
+	r.unknownKeys = nil
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("rule must be a mapping node")
+	}
+	allowed := map[string]struct{}{
+		"name": {},
+		"protocols": {},
+		"frontends": {},
+		"backends": {},
+		"match": {},
+		"return": {},
+		"fallback": {},
+	}
+	for i := 0; i < len(value.Content); i += 2 {
+		keyNode := value.Content[i]
+		key := strings.ToLower(strings.TrimSpace(keyNode.Value))
+		if _, ok := allowed[key]; !ok {
+			r.unknownKeys = append(r.unknownKeys, keyNode.Value)
+		}
+	}
+	if len(r.unknownKeys) > 0 {
+		ruleName := r.Name
+		if ruleName == "" {
+			ruleName = "<unnamed>"
+		}
+		return fmt.Errorf("rule %q: unknown field(s): %s", ruleName, strings.Join(r.unknownKeys, ", "))
+	}
+	return nil
 }
 
 // RawRuleMatch captures optional match clauses. All slices are OR-ed.
 type RawRuleMatch struct {
-    XFF      []string `yaml:"xff"`
-    Host     []string `yaml:"host"`
-    Path     []string `yaml:"path"`
-    Method   []string `yaml:"method"`
-    Country  []string `yaml:"country"`
-    CIDR     []string `yaml:"cidr"`
-    ASN      []uint   `yaml:"asn"`
-    UA       []string `yaml:"user_agent"`
-    Query    []string `yaml:"query"`
-    SNI      []string `yaml:"sni"`
-    JA3      []string `yaml:"ja3"`
-    Protocol []string `yaml:"protocol"` // shorthand when protocols only contains one value
+	XFF      []string `yaml:"xff"`
+	Host     []string `yaml:"host"`
+	Path     []string `yaml:"path"`
+	Method   []string `yaml:"method"`
+	Country  []string `yaml:"country"`
+	CIDR     []string `yaml:"cidr"`
+	ASN      []uint   `yaml:"asn"`
+	UA       []string `yaml:"user_agent"`
+	Query    []string `yaml:"query"`
+	SNI      []string `yaml:"sni"`
+	JA3      []string `yaml:"ja3"`
+	Protocol []string `yaml:"protocol"` // shorthand when protocols only contains one value
 
-    // Extended matchers (Option A): session, trust, and Cookie‑Guard telemetry
-    SessionPublic  *RawSessionPublicMatch  `yaml:"session_public"`
-    SessionSpecial *RawSessionSpecialMatch `yaml:"session_special"`
-    CookieGuard    *RawCookieGuardMatch    `yaml:"cookie_guard"`
+	// Extended matchers (Option A): session, trust, and Cookie‑Guard telemetry
+	SessionPublic  *RawSessionPublicMatch  `yaml:"session_public"`
+	SessionSpecial *RawSessionSpecialMatch `yaml:"session_special"`
+	CookieGuard    *RawCookieGuardMatch    `yaml:"cookie_guard"`
 
 	unknownKeys []string `yaml:"-"`
 }
@@ -83,23 +122,23 @@ func (m *RawRuleMatch) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("match must be a mapping node")
 	}
 
-    known := map[string]struct{}{
-        "xff":        {},
-        "host":       {},
-        "path":       {},
-        "method":     {},
-        "country":    {},
-        "cidr":       {},
-        "asn":        {},
-        "user_agent": {},
-        "query":      {},
-        "sni":        {},
-        "ja3":        {},
-        "protocol":   {},
-        "session_public":  {},
-        "session_special": {},
-        "cookie_guard":    {},
-    }
+	known := map[string]struct{}{
+		"xff":             {},
+		"host":            {},
+		"path":            {},
+		"method":          {},
+		"country":         {},
+		"cidr":            {},
+		"asn":             {},
+		"user_agent":      {},
+		"query":           {},
+		"sni":             {},
+		"ja3":             {},
+		"protocol":        {},
+		"session_public":  {},
+		"session_special": {},
+		"cookie_guard":    {},
+	}
 
 	for i := 0; i < len(value.Content); i += 2 {
 		keyNode := value.Content[i]
@@ -128,151 +167,161 @@ type Rule struct {
 
 // RuleMatch holds compiled matchers.
 type RuleMatch struct {
-    HostExact  map[string]struct{}
-    HostRegex  []*regexp.Regexp
-    PathRegex  []*regexp.Regexp
-    XFFRegex   []*regexp.Regexp
-    UARegex    []*regexp.Regexp
-    QueryRegex []*regexp.Regexp
-    SNIRegex   []*regexp.Regexp
-    JA3Regex   []*regexp.Regexp
-    Country    map[string]struct{}
-    CIDR       []*net.IPNet
-    ASN        map[uint]struct{}
-    Method     map[string]struct{}
+	HostExact  map[string]struct{}
+	HostRegex  []*regexp.Regexp
+	PathRegex  []*regexp.Regexp
+	XFFRegex   []*regexp.Regexp
+	UARegex    []*regexp.Regexp
+	QueryRegex []*regexp.Regexp
+	SNIRegex   []*regexp.Regexp
+	JA3Regex   []*regexp.Regexp
+	Country    map[string]struct{}
+	CIDR       []*net.IPNet
+	ASN        map[uint]struct{}
+	Method     map[string]struct{}
 
-    // Extended: compiled session and Cookie‑Guard matchers
-    SessionPublic  SessionPublicMatch
-    SessionSpecial SessionSpecialMatch
-    CookieGuard    CookieGuardMatch
+	// Extended: compiled session and Cookie‑Guard matchers
+	SessionPublic  SessionPublicMatch
+	SessionSpecial SessionSpecialMatch
+	CookieGuard    CookieGuardMatch
 }
 
 // RuleReturn stores explicit overrides and extra vars.
 type RuleReturn struct {
-    Reason string
-    Vars   Vars
+	Reason             string
+	Vars               Vars
+	SuspicionDelta     int
+	SuspicionReset     bool
+	SuspicionIgnoreSet bool
+	SuspicionIgnore    bool
+	Terminal           bool
 }
 
 // --- Extended matcher types ---
 
 // RawNumberCond captures numeric comparisons in YAML.
 type RawNumberCond struct {
-    GE *float64 `yaml:"ge"`
-    GT *float64 `yaml:"gt"`
-    LE *float64 `yaml:"le"`
-    LT *float64 `yaml:"lt"`
-    EQ *float64 `yaml:"eq"`
+	GE *float64 `yaml:"ge"`
+	GT *float64 `yaml:"gt"`
+	LE *float64 `yaml:"le"`
+	LT *float64 `yaml:"lt"`
+	EQ *float64 `yaml:"eq"`
 }
 
 type NumberCond struct {
-    GE *float64
-    GT *float64
-    LE *float64
-    LT *float64
-    EQ *float64
+	GE *float64
+	GT *float64
+	LE *float64
+	LT *float64
+	EQ *float64
 }
 
 func compileNumberCond(raw RawNumberCond) (NumberCond, error) {
-    // No validation beyond presence; conflicting operators are allowed and must all match.
-    return NumberCond{GE: raw.GE, GT: raw.GT, LE: raw.LE, LT: raw.LT, EQ: raw.EQ}, nil
+	// No validation beyond presence; conflicting operators are allowed and must all match.
+	return NumberCond{GE: raw.GE, GT: raw.GT, LE: raw.LE, LT: raw.LT, EQ: raw.EQ}, nil
 }
 
 func (c NumberCond) matches(v float64) bool {
-    if c.EQ != nil && v != *c.EQ {
-        return false
-    }
-    if c.GE != nil && v < *c.GE {
-        return false
-    }
-    if c.GT != nil && v <= *c.GT {
-        return false
-    }
-    if c.LE != nil && v > *c.LE {
-        return false
-    }
-    if c.LT != nil && v >= *c.LT {
-        return false
-    }
-    return true
+	if c.EQ != nil && v != *c.EQ {
+		return false
+	}
+	if c.GE != nil && v < *c.GE {
+		return false
+	}
+	if c.GT != nil && v <= *c.GT {
+		return false
+	}
+	if c.LE != nil && v > *c.LE {
+		return false
+	}
+	if c.LT != nil && v >= *c.LT {
+		return false
+	}
+	return true
 }
 
 type RawSessionPublicMatch struct {
-    ReqCount        RawNumberCond `yaml:"req_count"`
-    Rate            RawNumberCond `yaml:"rate"`
-    FirstPathRegex  []string      `yaml:"first_path_regex"`
-    FirstPathDeep   *bool         `yaml:"first_path_deep"`
-    IdleSeconds     RawNumberCond `yaml:"idle_seconds"`
+	ReqCount          RawNumberCond `yaml:"req_count"`
+	Rate              RawNumberCond `yaml:"rate"`
+	FirstPathRegex    []string      `yaml:"first_path_regex"`
+	FirstPathDeep     *bool         `yaml:"first_path_deep"`
+	IdleSeconds       RawNumberCond `yaml:"idle_seconds"`
+	SuspiciousScore   RawNumberCond `yaml:"suspicious_score"`
+	SuspiciousIgnored *bool         `yaml:"suspicious_ignored"`
 }
 
 type SessionPublicMatch struct {
-    ReqCount       NumberCond
-    Rate           NumberCond
-    FirstPathRegex []*regexp.Regexp
-    FirstPathDeep  *bool
-    IdleSeconds    NumberCond
+	ReqCount          NumberCond
+	Rate              NumberCond
+	FirstPathRegex    []*regexp.Regexp
+	FirstPathDeep     *bool
+	IdleSeconds       NumberCond
+	SuspiciousScore   NumberCond
+	SuspiciousIgnored *bool
 }
 
 type RawSessionSpecialMatch struct {
-    Role        []string     `yaml:"role"`
-    IdleSeconds RawNumberCond `yaml:"idle_seconds"`
+	Role        []string      `yaml:"role"`
+	IdleSeconds RawNumberCond `yaml:"idle_seconds"`
 }
 
 type SessionSpecialMatch struct {
-    Role        map[string]struct{}
-    IdleSeconds NumberCond
+	Role        map[string]struct{}
+	IdleSeconds NumberCond
 }
 
 type RawCookieGuardMatch struct {
-    Valid          *bool        `yaml:"valid"`
-    AgeSeconds     RawNumberCond `yaml:"age_seconds"`
-    ChallengeLevel []string     `yaml:"challenge_level"`
+	Valid          *bool         `yaml:"valid"`
+	AgeSeconds     RawNumberCond `yaml:"age_seconds"`
+	ChallengeLevel []string      `yaml:"challenge_level"`
 }
 
 type CookieGuardMatch struct {
-    Valid          *bool
-    AgeSeconds     NumberCond
-    ChallengeLevel map[string]struct{}
+	Valid          *bool
+	AgeSeconds     NumberCond
+	ChallengeLevel map[string]struct{}
 }
 
 func compileSessionPublic(raw RawSessionPublicMatch) (SessionPublicMatch, error) {
-    rc, _ := compileNumberCond(raw.ReqCount)
-    rt, _ := compileNumberCond(raw.Rate)
-    idle, _ := compileNumberCond(raw.IdleSeconds)
-    var re []*regexp.Regexp
-    for _, s := range raw.FirstPathRegex {
-        r, err := regexp.Compile(s)
-        if err != nil {
-            return SessionPublicMatch{}, fmt.Errorf("compile first_path_regex %q: %w", s, err)
-        }
-        re = append(re, r)
-    }
-    return SessionPublicMatch{ReqCount: rc, Rate: rt, FirstPathRegex: re, FirstPathDeep: raw.FirstPathDeep, IdleSeconds: idle}, nil
+	rc, _ := compileNumberCond(raw.ReqCount)
+	rt, _ := compileNumberCond(raw.Rate)
+	idle, _ := compileNumberCond(raw.IdleSeconds)
+	score, _ := compileNumberCond(raw.SuspiciousScore)
+	var re []*regexp.Regexp
+	for _, s := range raw.FirstPathRegex {
+		r, err := regexp.Compile(s)
+		if err != nil {
+			return SessionPublicMatch{}, fmt.Errorf("compile first_path_regex %q: %w", s, err)
+		}
+		re = append(re, r)
+	}
+	return SessionPublicMatch{ReqCount: rc, Rate: rt, FirstPathRegex: re, FirstPathDeep: raw.FirstPathDeep, IdleSeconds: idle, SuspiciousScore: score, SuspiciousIgnored: raw.SuspiciousIgnored}, nil
 }
 
 func compileSessionSpecial(raw RawSessionSpecialMatch) (SessionSpecialMatch, error) {
-    idle, _ := compileNumberCond(raw.IdleSeconds)
-    roles := make(map[string]struct{}, len(raw.Role))
-    for _, r := range raw.Role {
-        r = strings.TrimSpace(strings.ToLower(r))
-        if r == "" {
-            continue
-        }
-        roles[r] = struct{}{}
-    }
-    return SessionSpecialMatch{Role: roles, IdleSeconds: idle}, nil
+	idle, _ := compileNumberCond(raw.IdleSeconds)
+	roles := make(map[string]struct{}, len(raw.Role))
+	for _, r := range raw.Role {
+		r = strings.TrimSpace(strings.ToLower(r))
+		if r == "" {
+			continue
+		}
+		roles[r] = struct{}{}
+	}
+	return SessionSpecialMatch{Role: roles, IdleSeconds: idle}, nil
 }
 
 func compileCookieGuard(raw RawCookieGuardMatch) (CookieGuardMatch, error) {
-    age, _ := compileNumberCond(raw.AgeSeconds)
-    levels := make(map[string]struct{}, len(raw.ChallengeLevel))
-    for _, l := range raw.ChallengeLevel {
-        l = strings.TrimSpace(strings.ToLower(l))
-        if l == "" {
-            continue
-        }
-        levels[l] = struct{}{}
-    }
-    return CookieGuardMatch{Valid: raw.Valid, AgeSeconds: age, ChallengeLevel: levels}, nil
+	age, _ := compileNumberCond(raw.AgeSeconds)
+	levels := make(map[string]struct{}, len(raw.ChallengeLevel))
+	for _, l := range raw.ChallengeLevel {
+		l = strings.TrimSpace(strings.ToLower(l))
+		if l == "" {
+			continue
+		}
+		levels[l] = struct{}{}
+	}
+	return CookieGuardMatch{Valid: raw.Valid, AgeSeconds: age, ChallengeLevel: levels}, nil
 }
 
 // Config holds compiled rules, defaults, and trusted proxy settings.
@@ -531,38 +580,38 @@ func compileRuleMatch(raw RawRuleMatch) (RuleMatch, error) {
 		}
 		match.UARegex = append(match.UARegex, re)
 	}
-    for _, cidr := range raw.CIDR {
-        _, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
-        if err != nil {
-            return RuleMatch{}, fmt.Errorf("parse cidr %q: %w", cidr, err)
-        }
-        match.CIDR = append(match.CIDR, network)
-    }
+	for _, cidr := range raw.CIDR {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			return RuleMatch{}, fmt.Errorf("parse cidr %q: %w", cidr, err)
+		}
+		match.CIDR = append(match.CIDR, network)
+	}
 
-    // Compile extended matchers
-    if raw.SessionPublic != nil {
-        sp, err := compileSessionPublic(*raw.SessionPublic)
-        if err != nil {
-            return RuleMatch{}, err
-        }
-        match.SessionPublic = sp
-    }
-    if raw.SessionSpecial != nil {
-        ss, err := compileSessionSpecial(*raw.SessionSpecial)
-        if err != nil {
-            return RuleMatch{}, err
-        }
-        match.SessionSpecial = ss
-    }
-    if raw.CookieGuard != nil {
-        cg, err := compileCookieGuard(*raw.CookieGuard)
-        if err != nil {
-            return RuleMatch{}, err
-        }
-        match.CookieGuard = cg
-    }
+	// Compile extended matchers
+	if raw.SessionPublic != nil {
+		sp, err := compileSessionPublic(*raw.SessionPublic)
+		if err != nil {
+			return RuleMatch{}, err
+		}
+		match.SessionPublic = sp
+	}
+	if raw.SessionSpecial != nil {
+		ss, err := compileSessionSpecial(*raw.SessionSpecial)
+		if err != nil {
+			return RuleMatch{}, err
+		}
+		match.SessionSpecial = ss
+	}
+	if raw.CookieGuard != nil {
+		cg, err := compileCookieGuard(*raw.CookieGuard)
+		if err != nil {
+			return RuleMatch{}, err
+		}
+		match.CookieGuard = cg
+	}
 
-    return match, nil
+	return match, nil
 }
 
 func normalizeReturn(raw map[string]interface{}, ruleName string) (RuleReturn, error) {
@@ -570,7 +619,8 @@ func normalizeReturn(raw map[string]interface{}, ruleName string) (RuleReturn, e
 		Vars: make(Vars),
 	}
 	for k, v := range raw {
-		if strings.EqualFold(k, "reason") {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if lk == "reason" {
 			s, ok := v.(string)
 			if !ok {
 				return RuleReturn{}, fmt.Errorf("return reason must be string for rule %q", ruleName)
@@ -578,9 +628,123 @@ func normalizeReturn(raw map[string]interface{}, ruleName string) (RuleReturn, e
 			ret.Reason = s
 			continue
 		}
-		ret.Vars[k] = v
+		switch lk {
+		case "session.suspicious.increment", "session.suspicious.delta", "session.suspicious.add":
+			delta, err := parseIntValue(v)
+			if err != nil {
+				return RuleReturn{}, fmt.Errorf("rule %q: %v", ruleName, err)
+			}
+			ret.SuspicionDelta += delta
+		case "session.suspicious.reset":
+			b, err := parseBoolValue(v)
+			if err != nil {
+				return RuleReturn{}, fmt.Errorf("rule %q: %v", ruleName, err)
+			}
+			ret.SuspicionReset = b
+		case "session.suspicious.ignore":
+			b, err := parseBoolValue(v)
+			if err != nil {
+				return RuleReturn{}, fmt.Errorf("rule %q: %v", ruleName, err)
+			}
+			ret.SuspicionIgnoreSet = true
+			ret.SuspicionIgnore = b
+		case "stop", "terminal":
+			b, err := parseBoolValue(v)
+			if err != nil {
+				return RuleReturn{}, fmt.Errorf("rule %q: %v", ruleName, err)
+			}
+			ret.Terminal = b
+		default:
+			ret.Vars[k] = v
+		}
 	}
 	return ret, nil
+}
+
+func parseIntValue(v interface{}) (int, error) {
+	switch t := v.(type) {
+	case int:
+		return t, nil
+	case int8:
+		return int(t), nil
+	case int16:
+		return int(t), nil
+	case int32:
+		return int(t), nil
+	case int64:
+		return int(t), nil
+	case uint:
+		return int(t), nil
+	case uint8:
+		return int(t), nil
+	case uint16:
+		return int(t), nil
+	case uint32:
+		return int(t), nil
+	case uint64:
+		return int(t), nil
+	case float32:
+		if float64(int(t)) != float64(t) {
+			return 0, fmt.Errorf("expected integer value, got %v", v)
+		}
+		return int(t), nil
+	case float64:
+		if float64(int(t)) != t {
+			return 0, fmt.Errorf("expected integer value, got %v", v)
+		}
+		return int(t), nil
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, fmt.Errorf("expected integer value, got empty string")
+		}
+		iv, err := strconv.Atoi(s)
+		if err != nil {
+			return 0, err
+		}
+		return iv, nil
+	default:
+		return 0, fmt.Errorf("expected integer-compatible value, got %T", v)
+	}
+}
+
+func parseBoolValue(v interface{}) (bool, error) {
+	switch t := v.(type) {
+	case bool:
+		return t, nil
+	case string:
+		s := strings.TrimSpace(strings.ToLower(t))
+		switch s {
+		case "true", "1", "yes", "on":
+			return true, nil
+		case "false", "0", "no", "off":
+			return false, nil
+		default:
+			return false, fmt.Errorf("expected boolean-compatible string, got %q", t)
+		}
+	case int, int8, int16, int32, int64:
+		return fmt.Sprint(t) != "0", nil
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprint(t) != "0", nil
+	case float32:
+		if t == 0 {
+			return false, nil
+		}
+		if t == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("expected 0/1 float for boolean, got %v", v)
+	case float64:
+		if t == 0 {
+			return false, nil
+		}
+		if t == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("expected 0/1 float for boolean, got %v", v)
+	default:
+		return false, fmt.Errorf("expected boolean-compatible value, got %T", v)
+	}
 }
 
 func (d Defaults) withFallbacks() Defaults {

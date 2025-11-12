@@ -166,16 +166,18 @@ func TestSkipRuleWhenNoVarsUnlocked(t *testing.T) {
 		Defaults: Defaults{Global: Vars{"use_challenge": false}},
 		Rules: []Rule{
 			{
-				Name:  "first",
-				Match: RuleMatch{},
+				Name:      "first",
+				Protocols: map[string]struct{}{"http": {}},
+				Match:     RuleMatch{},
 				Return: RuleReturn{
 					Vars:   Vars{"use_challenge": true},
 					Reason: "first",
 				},
 			},
 			{
-				Name:  "second",
-				Match: RuleMatch{},
+				Name:      "second",
+				Protocols: map[string]struct{}{"http": {}},
+				Match:     RuleMatch{},
 				Return: RuleReturn{
 					Vars:   Vars{"use_challenge": true},
 					Reason: "second",
@@ -208,13 +210,16 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 		Defaults: Defaults{Global: Vars{"policy.bucket": "default", "policy.use_varnish": true, "policy.challenge": true}},
 		Rules: []Rule{
 			{
-				Name: "extended",
+				Name:      "extended",
+				Protocols: map[string]struct{}{"http": {}},
 				Match: RuleMatch{
 					SessionPublic: SessionPublicMatch{
-						ReqCount:      NumberCond{GE: ptrF(1)},
-						Rate:          NumberCond{GE: ptrF(0)},
-						FirstPathDeep: ptrB(true),
-						IdleSeconds:   NumberCond{LE: ptrF(3600)},
+						ReqCount:          NumberCond{GE: ptrF(1)},
+						Rate:              NumberCond{GE: ptrF(0)},
+						FirstPathDeep:     ptrB(true),
+						IdleSeconds:       NumberCond{LE: ptrF(3600)},
+						SuspiciousScore:   NumberCond{GE: ptrF(2)},
+						SuspiciousIgnored: ptrB(false),
 					},
 					SessionSpecial: SessionSpecialMatch{
 						Role:        map[string]struct{}{"authenticated": {}},
@@ -233,16 +238,18 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 	}
 
 	in := Input{
-		SessionPublicReqCount:      2,
-		SessionPublicRate:          0.2,
-		SessionPublicFirstPath:     "/index",
-		SessionPublicFirstPathDeep: true,
-		SessionPublicIdleSeconds:   10,
-		SessionSpecialRole:         "authenticated",
-		SessionSpecialIdleSeconds:  5,
-		CookieGuardValid:           true,
-		CookieAgeSeconds:           5,
-		ChallengeLevel:             "heavy",
+		SessionPublicReqCount:          2,
+		SessionPublicRate:              0.2,
+		SessionPublicFirstPath:         "/index",
+		SessionPublicFirstPathDeep:     true,
+		SessionPublicIdleSeconds:       10,
+		SessionPublicSuspiciousScore:   3,
+		SessionPublicSuspiciousIgnored: false,
+		SessionSpecialRole:             "authenticated",
+		SessionSpecialIdleSeconds:      5,
+		CookieGuardValid:               true,
+		CookieAgeSeconds:               5,
+		ChallengeLevel:                 "heavy",
 	}
 
 	out := cfg.Evaluate(in, nil, false)
@@ -250,11 +257,99 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 		t.Fatalf("extended match failed: out=%#v", out)
 	}
 
+	// Negative check: ignore mismatch
+	in.SessionPublicSuspiciousIgnored = true
+	out = cfg.Evaluate(in, nil, false)
+	if out.Reason != "fb" {
+		t.Fatalf("expected fallback on ignore mismatch, got: %#v", out)
+	}
+	in.SessionPublicSuspiciousIgnored = false
+
 	// Negative check: role mismatch
 	in.SessionSpecialRole = "guest"
 	out = cfg.Evaluate(in, nil, false)
 	if out.Reason != "fb" {
 		t.Fatalf("expected fallback on role mismatch, got: %#v", out)
+	}
+}
+
+func TestSuspicionDeltaTriggersChange(t *testing.T) {
+	ruleHits := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "hits", Help: "hits"}, []string{"component_type", "component", "host", "rule"})
+	cfg := Config{
+		Defaults: Defaults{Global: Vars{}},
+		Rules: []Rule{
+			{Name: "bump", Protocols: map[string]struct{}{"http": {}}, Match: RuleMatch{}, Return: RuleReturn{SuspicionDelta: 3}},
+		},
+		Fallback: RuleReturn{Reason: "fb", Vars: Vars{}},
+	}
+	out := cfg.Evaluate(Input{}, promRuleCounter{vec: ruleHits}, false)
+	if out.SuspicionDelta != 3 {
+		t.Fatalf("expected delta 3, got %d", out.SuspicionDelta)
+	}
+	metric, err := ruleHits.GetMetricWithLabelValues("backend", "", "", "bump")
+	if err != nil {
+		t.Fatalf("metric lookup: %v", err)
+	}
+	m := &dto.Metric{}
+	if err := metric.Write(m); err != nil {
+		t.Fatalf("metric write: %v", err)
+	}
+	if m.Counter.GetValue() != 1 {
+		t.Fatalf("expected rule hit")
+	}
+}
+
+func TestSuspicionReset(t *testing.T) {
+	cfg := Config{
+		Defaults: Defaults{Global: Vars{}},
+		Rules:    []Rule{{Name: "reset", Protocols: map[string]struct{}{"http": {}}, Match: RuleMatch{}, Return: RuleReturn{SuspicionReset: true}}},
+		Fallback: RuleReturn{Reason: "fb", Vars: Vars{}},
+	}
+	out := cfg.Evaluate(Input{}, nil, false)
+	if !out.SuspicionReset {
+		t.Fatalf("expected reset flag")
+	}
+}
+
+func TestSuspicionIgnoreFlag(t *testing.T) {
+	cfg := Config{
+		Defaults: Defaults{Global: Vars{}},
+		Rules: []Rule{
+			{Name: "ignore", Protocols: map[string]struct{}{"http": {}}, Match: RuleMatch{}, Return: RuleReturn{SuspicionIgnoreSet: true, SuspicionIgnore: true}},
+		},
+		Fallback: RuleReturn{Reason: "fb", Vars: Vars{}},
+	}
+	out := cfg.Evaluate(Input{}, nil, false)
+	if !out.SuspicionIgnoreSet || !out.SuspicionIgnore {
+		t.Fatalf("expected ignore flag")
+	}
+}
+
+func TestTerminalRuleStopsEvaluation(t *testing.T) {
+	ruleHits := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "hits", Help: "hits"}, []string{"component_type", "component", "host", "rule"})
+	cfg := Config{
+		Defaults: Defaults{Global: Vars{"policy.bucket": "default"}},
+		Rules: []Rule{
+			{Name: "terminal", Protocols: map[string]struct{}{"http": {}}, Match: RuleMatch{}, Return: RuleReturn{Vars: Vars{"policy.bucket": "stop"}, Reason: "stop", Terminal: true}},
+			{Name: "later", Protocols: map[string]struct{}{"http": {}}, Match: RuleMatch{}, Return: RuleReturn{Vars: Vars{"policy.bucket": "later"}, Reason: "later"}},
+		},
+		Fallback: RuleReturn{Reason: "fallback", Vars: Vars{"policy.extra": "x"}},
+	}
+	out := cfg.Evaluate(Input{}, promRuleCounter{vec: ruleHits}, false)
+	if out.Reason != "stop" || out.Vars["policy.bucket"] != "stop" {
+		t.Fatalf("terminal rule not applied: %#v", out)
+	}
+	if _, ok := out.Vars["policy.extra"]; ok {
+		t.Fatalf("fallback should not run after terminal rule")
+	}
+	if metric, err := ruleHits.GetMetricWithLabelValues("backend", "", "", "later"); err == nil {
+		m := &dto.Metric{}
+		if err := metric.Write(m); err != nil {
+			t.Fatalf("metric write: %v", err)
+		}
+		if m.Counter.GetValue() != 0 {
+			t.Fatalf("later rule should not hit metrics")
+		}
 	}
 }
 
