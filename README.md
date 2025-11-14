@@ -163,8 +163,15 @@ DECISION_SPOA_OPTS="\
 
 # Optional toggles; uncomment as needed.
 # DECISION_DEBUG=1
+# DECISION_DEBUG_VERBOSE=1
 # DECISION_METRICS_HOST_LABEL=1
 # DECISION_METRICS_GEOIP=1
+# DECISION_METRICS_CHALLENGE_LEVEL=1
+
+# Session table sizing overrides (keep defaults unless tuning rate limits).
+# DECISION_SESSION_PUBLIC_MAX=200000
+# DECISION_SESSION_PUBLIC_WINDOW=5m
+# DECISION_SESSION_SPECIAL_MAX=50000
 
 # /etc/default/decision-geoip-db-updates
 DECISION_GEOIP_DB_UPDATES_OPTS="\
