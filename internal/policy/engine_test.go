@@ -230,6 +230,12 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 						AgeSeconds:     NumberCond{GT: ptrF(1.5)},
 						ChallengeLevel: map[string]struct{}{"heavy": {}},
 					},
+					Botd: BotdMatch{
+						Verdict:    map[string]struct{}{"bad": {}},
+						Kind:       map[string]struct{}{"automation": {}},
+						Confidence: NumberCond{GE: ptrF(0.9)},
+						RequestID:  map[string]struct{}{"req-1": {}},
+					},
 				},
 				Return: RuleReturn{Vars: Vars{"policy.bucket": "ok"}, Reason: "ext"},
 			},
@@ -250,6 +256,10 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 		CookieGuardValid:               true,
 		CookieAgeSeconds:               5,
 		ChallengeLevel:                 "heavy",
+		BotdVerdict:                    "bad",
+		BotdKind:                       "automation",
+		BotdConfidence:                 0.95,
+		BotdRequestID:                  "req-1",
 	}
 
 	out := cfg.Evaluate(in, nil, false)
@@ -270,6 +280,20 @@ func TestEvaluateExtendedMatchers(t *testing.T) {
 	out = cfg.Evaluate(in, nil, false)
 	if out.Reason != "fb" {
 		t.Fatalf("expected fallback on role mismatch, got: %#v", out)
+	}
+	in.SessionSpecialRole = "authenticated"
+
+	in.BotdVerdict = "good"
+	out = cfg.Evaluate(in, nil, false)
+	if out.Reason != "fb" {
+		t.Fatalf("expected fallback on botd verdict mismatch, got: %#v", out)
+	}
+	in.BotdVerdict = "bad"
+
+	in.BotdRequestID = "other"
+	out = cfg.Evaluate(in, nil, false)
+	if out.Reason != "fb" {
+		t.Fatalf("expected fallback on botd request_id mismatch, got: %#v", out)
 	}
 }
 

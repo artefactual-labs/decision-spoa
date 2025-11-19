@@ -106,6 +106,43 @@ func TestSuspicionScore(t *testing.T) {
 	}
 }
 
+func TestRecordWithBotd(t *testing.T) {
+	table := NewPublicTable(10, time.Minute)
+	now := time.Unix(1700000000, 0)
+	table.now = func() time.Time { return now }
+
+	botd := BotdTelemetry{
+		Verdict:    "bad",
+		Kind:       "automation",
+		Confidence: 0.95,
+		RequestID:  "req-1",
+		SeenAt:     now,
+	}
+	snap := table.RecordWithBotd("key", "/", now, &botd)
+	if snap.Botd.Verdict != "bad" || snap.Botd.Kind != "automation" {
+		t.Fatalf("expected botd to persist, got %+v", snap.Botd)
+	}
+
+	// Subsequent record without telemetry should keep previous data.
+	updated := table.RecordWithBotd("key", "/next", now.Add(10*time.Second), nil)
+	if updated.Botd.Verdict != "bad" {
+		t.Fatalf("botd verdict should remain, got %q", updated.Botd.Verdict)
+	}
+	if updated.Botd.SeenAt.IsZero() {
+		t.Fatalf("botd seen timestamp should persist")
+	}
+
+	// Overwrite with new telemetry
+	newBotd := BotdTelemetry{Verdict: "good", SeenAt: now.Add(20 * time.Second)}
+	updated = table.RecordWithBotd("key", "/next", now.Add(20*time.Second), &newBotd)
+	if updated.Botd.Verdict != "good" {
+		t.Fatalf("botd verdict should update, got %q", updated.Botd.Verdict)
+	}
+	if !updated.Botd.SeenAt.Equal(newBotd.SeenAt) {
+		t.Fatalf("expected seen timestamp to update")
+	}
+}
+
 type fakeClock struct {
 	t time.Time
 }

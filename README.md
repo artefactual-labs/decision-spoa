@@ -20,6 +20,7 @@ Decision maintains an in‑memory "public" session entry keyed by a durable iden
 - `session.public.rate` (logged as `rate`): per‑second rate over the rolling window, computed as `recent_hits / rate_window_seconds`. For per‑minute, multiply by 60.
 - `session.public.idle_seconds`: time since this key last appeared.
 - `session.public.first_path` + `first_path_deep`: first path seen for the key and a boolean indicating whether it looks like a "deep" path.
+- `session.public.botd_*`: the most recent FingerprintJS BotD verdict (`verdict`, `kind`, `confidence`, `request_id`) plus `botd_age_seconds`, captured whenever Cookie Guard shares telemetry. Decision keeps this alongside the session so verdicts persist beyond Cookie Guard’s 5‑minute cache, and any `match.botd.*` condition reads this cached snapshot rather than requiring the live `cookieguard.*` vars to be present on the current request.
 
 Configuration knobs:
 
@@ -278,6 +279,10 @@ The tables below list the request/response variables exchanged between HAProxy a
 | `cookieguard_age` | Optional | `var(txn.cookieguard.age_seconds)` | Age of the verified token |
 | `cookieguard_level` | Optional | `var(txn.cookieguard.challenge_level)` | Challenge tier just issued (only set during challenge) |
 | `cookieguard_session` | Optional | `var(txn.cookieguard.session_hmac)` | Durable hb_v3 session hash (requires issue-token) |
+| `botd_verdict` | Optional | `var(txn.cookieguard.botd_verdict)` | Latest Fingerprint BotD verdict (`good`, `bad`, `suspect`). |
+| `botd_kind` | Optional | `var(txn.cookieguard.botd_kind)` (alias `var(txn.cookieguard.botd_tool)`) | BotD classification string describing the detected tool/kind of automation. |
+| `botd_confidence` | Optional | `var(txn.cookieguard.botd_confidence)` | BotD confidence score (`0`–`1`). |
+| `botd_request_id` | Optional | `var(txn.cookieguard.botd_request_id)` | Fingerprint BotD `requestId` for correlating detections. |
 | `session.public.key` *(response → request handoff)* | Optional | Resent by HAProxy if you capture it between calls | Keeps session continuity through restarts |
 | `res.hdrs` *(response message)* | Optional | Full response headers on `decide_response` | context.yml allowlist (special/public tables) |
 
@@ -298,8 +303,10 @@ Each output becomes `var(txn.decision.<name>)` because the SPOE agent uses `opti
 | `session.public.key`, `.req_count`, `.rate`, `.idle_seconds`, `.first_path`, `.first_path_deep`, `.recent_hits`, `.rate_window_seconds` | Inspect/limit session behaviour directly in HAProxy (e.g., `http-request deny if { var(txn.decision.session.public.req_count) gt 1000 }`). |
 | `session.public.suspicious_score` | Decision-managed score that accumulates via `session.suspicious.increment/reset`. Use it to gate ALTCHA re-challenges or hard denies once a threshold is reached. |
 | `session.public.suspicious_ignored` | `true` when the session is marked via `session.suspicious.ignore: true` (no further increments). Helpful for gating rules so trusted bots/networks are exempt. |
+| `session.public.botd_verdict`, `.botd_kind`, `.botd_confidence`, `.botd_request_id`, `.botd_age_seconds` | Last BotD verdict stored in Decision’s session tracker (age expresses seconds since telemetry was seen). Lets HAProxy/policy rules reuse detections even after Cookie Guard evicts its 5‑minute cache, and `match.botd.*` rules evaluate against this cached state. |
 | `session.special.role`, `.groups`, `.idle_seconds` | Trusted user hints (from context.yml). Skip challenges or grant bypass for known roles. |
 | `cookieguard.valid`, `.age_seconds`, `.challenge_level` | Mirror of Cookie Guard telemetry (validity/age/challenge mode). |
+| `cookieguard.botd_verdict`, `.botd_kind`, `.botd_confidence`, `.botd_request_id` | Mirror of Cookie Guard’s BotD verdict cache so HAProxy ACLs can reuse Decision’s normalized view (`cookieguard.botd_tool` aliases `.botd_kind`). |
 
 All outputs are optional except the ones your HAProxy logic relies on; use `-m bool`/`-m found` guards before acting on them. Defaults + fallback in `policy.yml` ensure the variables you care about are always present.
 
@@ -409,6 +416,11 @@ This section documents every supported field in `policy.yml` and how matches are
     - `valid`: boolean
     - `age_seconds`: numeric comparator map
     - `challenge_level`: array of levels (strings)
+  - `botd`: BotD verdict cache from Cookie Guard
+    - `verdict`: array of verdicts (`good`, `bad`, `suspect`, etc.)
+    - `kind`: array of automation tool labels (case-insensitive)
+    - `confidence`: numeric comparator map (matches `botd_confidence`)
+    - `request_id`: array of exact Fingerprint request IDs
 
 - Return map
   - `reason` (string): optional human‑readable reason. If omitted, the fallback reason applies (default `"default-policy"`).
@@ -429,7 +441,7 @@ Notes on session‑driven inputs
   - Suspicion score: `session.public.suspicious_score` reflects the accumulated score managed by Decision; use `session.suspicious.increment/reset` to mutate it.
   - Suspicion ignore flag: `session.public.suspicious_ignored` is `true` after a rule sets `session.suspicious.ignore: true`, preventing future increments for that session.
   - Special session (trusted profile): `session.special.role`, `session.special.groups`, `session.special.idle_seconds`.
-  - Cookie‑Guard: `cookieguard.valid` (bool), `cookieguard.age_seconds` (float), `cookieguard.challenge_level` (string).
+  - Cookie‑Guard: `cookieguard.valid` (bool), `cookieguard.age_seconds` (float), `cookieguard.challenge_level` (string), BotD verdict metadata (`cookieguard.botd_verdict`, `.botd_kind`/`.botd_tool`, `.botd_confidence`, `.botd_request_id`), and the session-cached copies under `session.public.botd_*`.
 Examples using session and Cookie‑Guard matchers
 ```yaml
 - name: bursty-client
@@ -456,6 +468,15 @@ Examples using session and Cookie‑Guard matchers
       age_seconds: { gt: 2 }
   return:
     reason: cg-fresh
+
+- name: botd-bad-high-confidence
+  match:
+    botd:
+      verdict: ["bad"]
+      confidence: { ge: 0.9 }
+  return:
+    deny: true
+    reason: botd-bad
 
 - name: allow-search-bots
   match:
@@ -538,6 +559,10 @@ The policy engine consumes the following inputs (see `internal/policy/engine.go:
   - `CookieGuardValid` → `match.cookie_guard.valid`.
   - `CookieAgeSeconds` → `match.cookie_guard.age_seconds`.
   - `ChallengeLevel` → `match.cookie_guard.challenge_level`.
+  - `BotdVerdict` → `match.botd.verdict` (case-insensitive).
+  - `BotdKind` → `match.botd.kind` (case-insensitive; `botd_tool` alias is folded here).
+  - `BotdConfidence` → `match.botd.confidence`.
+  - `BotdRequestID` → `match.botd.request_id`.
 
 - Geo dependencies
   - `Country` and `ASN` require GeoIP DBs to be present (`--city-db`, `--asn-db`). When missing, matches on these fields never fire.

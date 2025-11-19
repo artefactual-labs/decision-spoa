@@ -461,6 +461,16 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 	}
 	challengeLevel := strings.ToLower(strings.TrimSpace(args["cookieguard_level"]))
 	cookieSession := args["cookieguard_session"]
+	botdVerdict := strings.TrimSpace(args["botd_verdict"])
+	botdKind := strings.TrimSpace(args["botd_kind"])
+	if botdKind == "" {
+		botdKind = strings.TrimSpace(args["botd_tool"])
+	}
+	rawBotdConfidence := strings.TrimSpace(args["botd_confidence"])
+	botdConfidence := parseFloat(rawBotdConfidence)
+	botdConfidenceProvided := rawBotdConfidence != ""
+	botdRequestID := strings.TrimSpace(args["botd_request_id"])
+	hasBotdInput := botdVerdict != "" || botdKind != "" || botdRequestID != "" || botdConfidenceProvided
 
 	var publicSnapshot session.PublicSnapshot
 	var publicRate float64
@@ -484,7 +494,17 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 		publicKey = trust.publicSessionKey(baseToken, ip, ua)
 		if publicKey != "" {
 			decisionSessionKeySourceTotal.WithLabelValues(keySource).Inc()
-			publicSnapshot = trust.public.Record(publicKey, path, now)
+			var botdTelemetry *session.BotdTelemetry
+			if hasBotdInput {
+				botdTelemetry = &session.BotdTelemetry{
+					Verdict:    botdVerdict,
+					Kind:       botdKind,
+					Confidence: botdConfidence,
+					RequestID:  botdRequestID,
+					SeenAt:     now,
+				}
+			}
+			publicSnapshot = trust.public.RecordWithBotd(publicKey, path, now, botdTelemetry)
 			if publicSnapshot.RecentWindowSec > 0 {
 				publicRate = float64(publicSnapshot.RecentHits) / publicSnapshot.RecentWindowSec
 			}
@@ -492,6 +512,18 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 				publicIdle = now.Sub(publicSnapshot.LastSeen).Seconds()
 			}
 			firstPathDeep = pathLooksDeep(publicSnapshot.FirstPath)
+			if !hasBotdInput && !publicSnapshot.Botd.SeenAt.IsZero() {
+				botdVerdict = publicSnapshot.Botd.Verdict
+				if botdKind == "" {
+					botdKind = publicSnapshot.Botd.Kind
+				}
+				if !botdConfidenceProvided {
+					botdConfidence = publicSnapshot.Botd.Confidence
+				}
+				if botdRequestID == "" {
+					botdRequestID = publicSnapshot.Botd.RequestID
+				}
+			}
 		}
 	}
 
@@ -550,6 +582,10 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 		CookieAgeSeconds:               cookieAgeSeconds,
 		ChallengeLevel:                 challengeLevel,
 		CookieGuardValid:               cookieGuardValid,
+		BotdVerdict:                    botdVerdict,
+		BotdKind:                       botdKind,
+		BotdConfidence:                 botdConfidence,
+		BotdRequestID:                  botdRequestID,
 	}
 
 	out := cfg.Evaluate(input, promRuleCounter{CounterVec: decisionRulesHitTotal}, metricsHostLabel)
@@ -610,6 +646,13 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 		setResp(resp, "session.public.rate_window_seconds", publicSnapshot.RecentWindowSec)
 		setResp(resp, "session.public.suspicious_score", publicSnapshot.SuspiciousScore)
 		setResp(resp, "session.public.suspicious_ignored", publicSnapshot.SuspiciousIgnored)
+		if !publicSnapshot.Botd.SeenAt.IsZero() {
+			setResp(resp, "session.public.botd_verdict", publicSnapshot.Botd.Verdict)
+			setResp(resp, "session.public.botd_kind", publicSnapshot.Botd.Kind)
+			setResp(resp, "session.public.botd_confidence", publicSnapshot.Botd.Confidence)
+			setResp(resp, "session.public.botd_request_id", publicSnapshot.Botd.RequestID)
+			setResp(resp, "session.public.botd_age_seconds", now.Sub(publicSnapshot.Botd.SeenAt).Seconds())
+		}
 	}
 	if specialSnapshot.Key != "" {
 		setResp(resp, "session.special.role", specialSnapshot.Role)
@@ -619,6 +662,11 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 	setResp(resp, "cookieguard.valid", cookieGuardValid)
 	setResp(resp, "cookieguard.age_seconds", cookieAgeSeconds)
 	setResp(resp, "cookieguard.challenge_level", challengeLevel)
+	setResp(resp, "cookieguard.botd_verdict", botdVerdict)
+	setResp(resp, "cookieguard.botd_kind", botdKind)
+	setResp(resp, "cookieguard.botd_tool", botdKind)
+	setResp(resp, "cookieguard.botd_confidence", botdConfidence)
+	setResp(resp, "cookieguard.botd_request_id", botdRequestID)
 
 	if cfg.Debug {
 		// Optional verbose line with raw inputs and snapshots
@@ -627,8 +675,9 @@ func handleRequestMessage(args map[string]string, raw map[string]string, cfg pol
 			entries := trusted.Entries()
 			hb2 := cookies["hb_v2"] != ""
 			hb3 := cookies["hb_v3"] != ""
-			log.Printf("policy-verbose: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s m=%s host=%s path=%s query=%q sni=%s ja3=%s hb2=%t hb3=%t key_src=%s public={key=%s req=%d hits=%d rate=%.6f idle=%.3f first_path=%s deep=%t sus=%d ignore=%t} special={role=%s idle=%.3f groups=%s} reason=%s bucket=%s elapsed=%.6f ua=%q vars=%v",
+			log.Printf("policy-verbose: raw_input=%v fe=%s be=%s src=%s xff=%s ip=%v xff_used=%t xff_stripped=%d trusted_peer=%t trusted_entries=%v asn=%d c=%s m=%s host=%s path=%s query=%q sni=%s ja3=%s hb2=%t hb3=%t key_src=%s botd={verdict=%s kind=%s confidence=%.3f request_id=%s} public={key=%s req=%d hits=%d rate=%.6f idle=%.3f first_path=%s deep=%t sus=%d ignore=%t} special={role=%s idle=%.3f groups=%s} reason=%s bucket=%s elapsed=%.6f ua=%q vars=%v",
 				sortedRaw(raw), frontend, backend, src, xff, ip, xffUsed, strippedHops, pt, entries, asn, country, strings.ToUpper(method), host, truncatePath(path, 200), query, sni, ja3, hb2, hb3, keySource,
+				botdVerdict, botdKind, botdConfidence, botdRequestID,
 				publicSnapshot.Key, publicSnapshot.RequestCount, publicSnapshot.RecentHits, publicRate, publicIdle, publicSnapshot.FirstPath, firstPathDeep, publicSnapshot.SuspiciousScore, publicSnapshot.SuspiciousIgnored,
 				specialSnapshot.Role, specialIdle, strings.Join(specialSnapshot.Groups, ","), out.Reason, bucketLabel, elapsed, ua, resp)
 		}
