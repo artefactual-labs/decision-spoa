@@ -20,6 +20,7 @@ type PublicSnapshot struct {
 	RecentHits        int
 	SuspiciousScore   int
 	SuspiciousIgnored bool
+	Botd              BotdTelemetry
 }
 
 // PublicTable tracks short-lived public sessions derived from hashed
@@ -52,6 +53,16 @@ type PublicRecord struct {
 	recent            []time.Time
 	SuspiciousScore   int
 	SuspiciousIgnored bool
+	Botd              BotdTelemetry
+}
+
+// BotdTelemetry stores the last-known BotD verdict for this session.
+type BotdTelemetry struct {
+	Verdict    string
+	Kind       string
+	Confidence float64
+	RequestID  string
+	SeenAt     time.Time
 }
 
 // NewPublicTable creates a new LRU-backed public session table. rateWindow
@@ -70,6 +81,16 @@ func NewPublicTable(maxEntries int, rateWindow time.Duration) *PublicTable {
 // Record updates (or creates) the public session for key and returns a
 // snapshot after the mutation.
 func (t *PublicTable) Record(key, path string, ts time.Time) PublicSnapshot {
+	return t.record(key, path, ts, nil)
+}
+
+// RecordWithBotd accepts optional BotD telemetry that should be stored alongside
+// the session entry. Passing nil leaves existing telemetry untouched.
+func (t *PublicTable) RecordWithBotd(key, path string, ts time.Time, botd *BotdTelemetry) PublicSnapshot {
+	return t.record(key, path, ts, botd)
+}
+
+func (t *PublicTable) record(key, path string, ts time.Time, botd *BotdTelemetry) PublicSnapshot {
 	if ts.IsZero() {
 		ts = t.now()
 	}
@@ -83,6 +104,12 @@ func (t *PublicTable) Record(key, path string, ts time.Time) PublicSnapshot {
 	rec.LastSeen = ts
 	if rec.FirstPath == "" && path != "" {
 		rec.FirstPath = path
+	}
+	if botd != nil {
+		if botd.SeenAt.IsZero() {
+			botd.SeenAt = ts
+		}
+		rec.Botd = *botd
 	}
 	rec.recent = append(rec.recent, ts)
 	cutoff := ts.Add(-t.rateWindow)
@@ -155,6 +182,7 @@ func snapshotFromRecord(rec *PublicRecord, window time.Duration) PublicSnapshot 
 		RecentHits:        len(recent),
 		SuspiciousScore:   rec.SuspiciousScore,
 		SuspiciousIgnored: rec.SuspiciousIgnored,
+		Botd:              rec.Botd,
 	}
 }
 

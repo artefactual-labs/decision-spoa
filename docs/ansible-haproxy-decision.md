@@ -18,7 +18,7 @@ Use this guide alongside those files to follow every line with a narrative expla
 - **HAProxy** – A high‑performance reverse proxy. Think of it as the front door to the web application. It accepts incoming connections, applies logic (rate limits, blocking, routing), and forwards traffic to the internal services. See [haproxy.org](https://www.haproxy.org) for project documentation.
 - **SPOA (Stream Processing Offload Agent)** – A helper program that HAProxy can consult while a request is being processed. HAProxy streams request attributes to the SPOA and receives an immediate decision (e.g., “allow”, “challenge”, “deny”). The SPOA protocol is lightweight and asynchronous, so HAProxy never blocks; it simply moves to the next task while Go routines in the agent evaluate rules in parallel. Writing SPOAs in Go makes it easy to combine high-performance I/O with rich telemetry: the same code that answers HAProxy can increment [Prometheus](https://prometheus.io) counters and histograms, providing real-time observability with minimal effort. For a protocol primer, see the [HAProxy SPOE/SPOA documentation](https://docs.haproxy.org/3.0/configuration.html#9.3), the [HAProxy blog on building SPOAs](https://www.haproxy.com/blog/introduction-to-spoe-and-spoa/), or the open-source [spoa-server examples](https://github.com/haproxy/spoa-server).
 - **Decision SPOA** – Artefactual’s policy engine. It reads `policy.yml`, evaluates rules (country, ASN, user agent, etc.), and returns variables such as `use_varnish`, `use_challenge`, `use_coraza`, `deny`, and `rate_bot`. Source code lives at [github.com/artefactual-labs/decision](https://github.com/artefactual-labs/decision).
-- **Cookie Guard SPOA** – A helper that issues and validates a lightweight JavaScript challenge cookie (`hb_v2`). If a browser passes the challenge, it receives a signed cookie and is allowed through. Bots typically fail. The agent is maintained in the [cookie-guard](https://github.com/artefactual-labs/cookie-guard) repository.
+- **Cookie Guard SPOA** – A helper that issues and validates a lightweight JavaScript challenge cookie (`hb_v2`) and ingests FingerprintJS BotD verdicts. Valid browsers receive a signed cookie, and any cached BotD telemetry (`botd_verdict`, `botd_kind`, `botd_confidence`, `botd_request_id`) is forwarded to Decision so policy rules can react without rerunning the detector. The agent is maintained in the [cookie-guard](https://github.com/artefactual-labs/cookie-guard) repository.
 - **Coraza SPOA** – A Web Application Firewall (WAF) powered by the Coraza engine. It analyzes requests for malicious patterns (SQL injection, cross-site scripting, etc.) and can instruct HAProxy to block or drop suspicious traffic. This deployment uses the [artefactual-labs/coraza-spoa-crs-package](https://github.com/artefactual-labs/coraza-spoa-crs-package), which ships the Coraza SPOA with the full OWASP Core Rule Set (CRS) enabled. Learn more about the underlying WAF at [coraza.io](https://coraza.io).
 - **Varnish** – A HTTP cache that fronts the origin application. When a response is cached it can be served immediately; cache misses are forwarded to the origin at `127.0.0.1:80` (the AtoM nginx instance). See [varnish-cache.org](https://varnish-cache.org).
 - **Stick table** – HAProxy’s in-memory counter. We use it to keep track of how many requests a client (or group of clients) has made in a time window.
@@ -65,7 +65,8 @@ Key idea: every request is evaluated by Decision, optionally challenged by Cooki
 8. **Backend-specific Decision call**. Before the request reaches Varnish or the origin, HAProxy labels it with the backend name (`varnish` or `app_backend`) and calls Decision again. This allows backend-specific rules and keeps metrics accurate.
 9. **Cookie Guard challenge (if required)**. If `use_challenge=true`, the backend invokes Cookie Guard:
    - Validation: if an `hb_v2` cookie is present, Cookie Guard verifies it.  
-   - Issuing: if the cookie is missing/invalid, HAProxy redirects to the ALTCHA controller at `/altcha` and proxies both the controller and assets to Cookie Guard’s HTTP listener (`cookie_guard_http_backend`).
+   - Issuing: if the cookie is missing/invalid, HAProxy redirects to the ALTCHA controller at `/altcha` and proxies both the controller and assets to Cookie Guard’s HTTP listener (`cookie_guard_http_backend`), which also serves `/assets/botd/active/botd.esm.js` for the FingerprintJS BotD script.
+   - BotD: browsers post verdicts to `/botd-report`; Cookie Guard caches the verdict/kind/confidence/request_id for 5 minutes and exposes them as `var(txn.cookieguard.botd_*)`, which Decision consumes on the next request and then stores in its own session table so the information survives beyond those 5 minutes.
 10. **Headers rewritten**. HAProxy writes the correct `Host`, `X-Real-IP`, and `X-Forwarded-Proto` headers so the backend sees consistent information.
 11. **Origin/varnish response**. The backend generates a response which travels back through HAProxy to the client.
 
@@ -163,8 +164,9 @@ By removing these IPs from `X-Forwarded-For`, Decision always sees the true clie
 | 6 | `deny-from-bad-asn` | ASN is in a curated list associated with abuse (Alibaba, Contabo, QuickPacket, etc.). | `deny=true`. | Blocks networks known for malicious activity. The frontend immediately returns HTTP 429; the request never reaches the application. |
 | 7 | `deny-from-bots-user-agent` | UA matches a curated set of aggressive bots and AI collectors (e.g., Ahrefs, GPTBot). | `rate_bot=true`. | Flags these bots for rate limiting rather than outright blocking. This lets us measure their activity and tune limits without causing breakages. |
 | 8 | `bots-ua-rate-limit` | UA matches an extensive regex covering long-tail crawlers and automation clients (Pingdom, curl, Slackbot, etc.). | `rate_bot=true`. | Extends the rate limiting umbrella to most other bots. Combined with rule 7 it catches both known and emerging crawlers. |
+| 9 | `botd-bad-deny` | Cookie Guard reports a recent BotD verdict of `bad` with confidence ≥ 0.9 for this IP+UA hash. | `deny=true`, `reason=botd-bad`. | When the browser itself reports automation, Decision denies immediately—no need to burn challenge/WAF resources on a known bot. |
 
-**Ordering matters:** allow-lists (rules 1-5) run before deny/rate rules (6-8). Once a variable is set, later rules cannot override it.
+**Ordering matters:** allow-lists (rules 1-5) run before deny/rate/BotD rules (6-9). Once a variable is set, later rules cannot override it.
 
 ### 5.4 Outputs and How HAProxy Uses Them
 
@@ -173,6 +175,7 @@ By removing these IPs from `X-Forwarded-For`, Decision always sees the true clie
 - `use_challenge=true` → Cookie Guard runs; otherwise challenge logic is skipped.
 - `use_coraza=false` → Frontend ignores Coraza’s deny/drop commands.
 - `rate_bot=true` → Frontend adds the request to the stick table and enforces the 120 req/min limit.
+- `session.public.botd_*` → Exposes the last BotD verdict/metadata Decision saw for that session so ACLs can continue acting on detections even after Cookie Guard’s five-minute cache expires.
 
 This design keeps enforcement centralised in HAProxy while letting policy authors describe intent declaratively in YAML.
 
@@ -219,7 +222,7 @@ This flow ensures every request is evaluated multiple times with progressively m
 
 - **Layered defence** – IP reputation (ASN), GeoIP, user-agent detection, challenge/response, and WAF analysis work together. Attackers must bypass multiple independent systems.
 - **Trust-aware exclusions** – Internal users and automation receive tailored access, reducing false positives and support tickets.
-- **Bot management** – The combination of JS challenges and rate limits keeps AI harvesters and scrapers at bay without impacting legitimate users.
+- **Bot management** – The combination of JS challenges, BotD telemetry, and rate limits keeps AI harvesters and scrapers at bay without impacting legitimate users.
 
 ### 7.2 Performance & Reliability
 
@@ -230,7 +233,7 @@ This flow ensures every request is evaluated multiple times with progressively m
 ### 7.3 Observability & Transparency
 
 - **Prometheus metrics** – Decision exports `decision_policy_decisions_total` labeled with `component_type` (frontend/backend), `component` (name), `bucket`, and `reason`. This makes it easy to build dashboards showing exactly why requests were denied, challenged, or cached.
-- **Verbose logging** – Enabling `--debug` on Decision prints the raw input, resolved IP, trusted proxy stripping results, and all variables. Troubleshooting becomes straightforward and auditable.
+- **Verbose logging** – Enabling `--debug` on Decision prints the raw input, resolved IP, trusted proxy stripping results, and all variables (including the cached BotD verdicts from the session table). Troubleshooting becomes straightforward and auditable.
 - **Structured policy** – Every rule in `policy.yml` has a clear name and comment. Customers can audit and request changes confidently.
 
 ---

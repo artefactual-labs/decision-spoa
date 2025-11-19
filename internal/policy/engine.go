@@ -34,6 +34,10 @@ type Input struct {
 	CookieAgeSeconds               float64
 	ChallengeLevel                 string
 	CookieGuardValid               bool
+	BotdVerdict                    string
+	BotdKind                       string
+	BotdConfidence                 float64
+	BotdRequestID                  string
 }
 
 type Output struct {
@@ -373,6 +377,39 @@ func conditionsMatch(match RuleMatch, in Input) bool {
 			return false
 		}
 	}
+
+	// Extended BotD matchers
+	if len(match.Botd.Verdict) > 0 {
+		verdict := strings.ToLower(strings.TrimSpace(in.BotdVerdict))
+		if verdict == "" {
+			return false
+		}
+		if _, ok := match.Botd.Verdict[verdict]; !ok {
+			return false
+		}
+	}
+	if len(match.Botd.Kind) > 0 {
+		kind := strings.ToLower(strings.TrimSpace(in.BotdKind))
+		if kind == "" {
+			return false
+		}
+		if _, ok := match.Botd.Kind[kind]; !ok {
+			return false
+		}
+	}
+	if !match.Botd.Confidence.matches(in.BotdConfidence) {
+		return false
+	}
+	if len(match.Botd.RequestID) > 0 {
+		reqID := strings.TrimSpace(in.BotdRequestID)
+		if reqID == "" {
+			return false
+		}
+		if _, ok := match.Botd.RequestID[reqID]; !ok {
+			return false
+		}
+	}
+
 	return true
 }
 

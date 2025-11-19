@@ -81,6 +81,11 @@ func collectArgs(msgs *message.Messages) (map[string]string, map[string]string) 
 		"cookieguard_age",
 		"cookieguard_level",
 		"cookieguard_session",
+		"botd_verdict",
+		"botd_kind",
+		"botd_tool",
+		"botd_confidence",
+		"botd_request_id",
 		"session.public.key",
 		"res.hdrs",
 	}

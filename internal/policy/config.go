@@ -39,14 +39,14 @@ type RawTrustedConfig struct {
 
 // RawRule is the uncompiled rule definition shipped in YAML.
 type RawRule struct {
-	Name      string                 `yaml:"name"`
-	Protocols []string               `yaml:"protocols"`
-	Frontends []string               `yaml:"frontends"`
-	Backends  []string               `yaml:"backends"`
-	Match     RawRuleMatch           `yaml:"match"`
-	Return    map[string]interface{} `yaml:"return"`
-	Fallback  bool                   `yaml:"fallback"`
-	unknownKeys []string             `yaml:"-"`
+	Name        string                 `yaml:"name"`
+	Protocols   []string               `yaml:"protocols"`
+	Frontends   []string               `yaml:"frontends"`
+	Backends    []string               `yaml:"backends"`
+	Match       RawRuleMatch           `yaml:"match"`
+	Return      map[string]interface{} `yaml:"return"`
+	Fallback    bool                   `yaml:"fallback"`
+	unknownKeys []string               `yaml:"-"`
 }
 
 func (r *RawRule) UnmarshalYAML(value *yaml.Node) error {
@@ -61,13 +61,13 @@ func (r *RawRule) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("rule must be a mapping node")
 	}
 	allowed := map[string]struct{}{
-		"name": {},
+		"name":      {},
 		"protocols": {},
 		"frontends": {},
-		"backends": {},
-		"match": {},
-		"return": {},
-		"fallback": {},
+		"backends":  {},
+		"match":     {},
+		"return":    {},
+		"fallback":  {},
 	}
 	for i := 0; i < len(value.Content); i += 2 {
 		keyNode := value.Content[i]
@@ -105,6 +105,7 @@ type RawRuleMatch struct {
 	SessionPublic  *RawSessionPublicMatch  `yaml:"session_public"`
 	SessionSpecial *RawSessionSpecialMatch `yaml:"session_special"`
 	CookieGuard    *RawCookieGuardMatch    `yaml:"cookie_guard"`
+	BotD           *RawBotdMatch           `yaml:"botd"`
 
 	unknownKeys []string `yaml:"-"`
 }
@@ -138,6 +139,7 @@ func (m *RawRuleMatch) UnmarshalYAML(value *yaml.Node) error {
 		"session_public":  {},
 		"session_special": {},
 		"cookie_guard":    {},
+		"botd":            {},
 	}
 
 	for i := 0; i < len(value.Content); i += 2 {
@@ -180,10 +182,11 @@ type RuleMatch struct {
 	ASN        map[uint]struct{}
 	Method     map[string]struct{}
 
-	// Extended: compiled session and Cookie‑Guard matchers
+	// Extended: compiled session, Cookie‑Guard, and BotD matchers
 	SessionPublic  SessionPublicMatch
 	SessionSpecial SessionSpecialMatch
 	CookieGuard    CookieGuardMatch
+	Botd           BotdMatch
 }
 
 // RuleReturn stores explicit overrides and extra vars.
@@ -282,6 +285,20 @@ type CookieGuardMatch struct {
 	ChallengeLevel map[string]struct{}
 }
 
+type RawBotdMatch struct {
+	Verdict    []string      `yaml:"verdict"`
+	Kind       []string      `yaml:"kind"`
+	Confidence RawNumberCond `yaml:"confidence"`
+	RequestID  []string      `yaml:"request_id"`
+}
+
+type BotdMatch struct {
+	Verdict    map[string]struct{}
+	Kind       map[string]struct{}
+	Confidence NumberCond
+	RequestID  map[string]struct{}
+}
+
 func compileSessionPublic(raw RawSessionPublicMatch) (SessionPublicMatch, error) {
 	rc, _ := compileNumberCond(raw.ReqCount)
 	rt, _ := compileNumberCond(raw.Rate)
@@ -322,6 +339,44 @@ func compileCookieGuard(raw RawCookieGuardMatch) (CookieGuardMatch, error) {
 		levels[l] = struct{}{}
 	}
 	return CookieGuardMatch{Valid: raw.Valid, AgeSeconds: age, ChallengeLevel: levels}, nil
+}
+
+func compileBotd(raw RawBotdMatch) (BotdMatch, error) {
+	confidence, _ := compileNumberCond(raw.Confidence)
+	asLowerSet := func(values []string) map[string]struct{} {
+		if len(values) == 0 {
+			return nil
+		}
+		out := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v == "" {
+				continue
+			}
+			out[v] = struct{}{}
+		}
+		return out
+	}
+	asExactSet := func(values []string) map[string]struct{} {
+		if len(values) == 0 {
+			return nil
+		}
+		out := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			out[v] = struct{}{}
+		}
+		return out
+	}
+	return BotdMatch{
+		Verdict:    asLowerSet(raw.Verdict),
+		Kind:       asLowerSet(raw.Kind),
+		Confidence: confidence,
+		RequestID:  asExactSet(raw.RequestID),
+	}, nil
 }
 
 // Config holds compiled rules, defaults, and trusted proxy settings.
@@ -609,6 +664,13 @@ func compileRuleMatch(raw RawRuleMatch) (RuleMatch, error) {
 			return RuleMatch{}, err
 		}
 		match.CookieGuard = cg
+	}
+	if raw.BotD != nil {
+		bd, err := compileBotd(*raw.BotD)
+		if err != nil {
+			return RuleMatch{}, err
+		}
+		match.Botd = bd
 	}
 
 	return match, nil

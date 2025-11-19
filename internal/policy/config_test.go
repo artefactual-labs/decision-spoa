@@ -179,6 +179,12 @@ func TestCompileExtendedMatchers(t *testing.T) {
 					AgeSeconds:     RawNumberCond{GT: ptrFloat(1.5)},
 					ChallengeLevel: []string{"heavy"},
 				},
+				BotD: &RawBotdMatch{
+					Verdict:    []string{"bad", "suspect"},
+					Kind:       []string{"automation"},
+					Confidence: RawNumberCond{GE: ptrFloat(0.8)},
+					RequestID:  []string{"req-123"},
+				},
 			},
 			Return: map[string]interface{}{"policy.bucket": "ok"},
 		},
@@ -208,6 +214,18 @@ func TestCompileExtendedMatchers(t *testing.T) {
 	if _, ok := r.Return.Vars["policy.bucket"]; !ok {
 		t.Fatalf("return var missing")
 	}
+	if _, ok := r.Match.Botd.Verdict["bad"]; !ok {
+		t.Fatalf("botd verdict matcher missing")
+	}
+	if _, ok := r.Match.Botd.Kind["automation"]; !ok {
+		t.Fatalf("botd kind matcher missing")
+	}
+	if !r.Match.Botd.Confidence.matches(0.95) {
+		t.Fatalf("botd confidence matcher missing")
+	}
+	if _, ok := r.Match.Botd.RequestID["req-123"]; !ok {
+		t.Fatalf("botd request_id matcher missing")
+	}
 }
 
 func TestNormalizeReturnSuspicion(t *testing.T) {
@@ -215,7 +233,7 @@ func TestNormalizeReturnSuspicion(t *testing.T) {
 		"session.suspicious.increment": 3,
 		"session.suspicious.reset":     true,
 		"session.suspicious.ignore":    true,
-		"stop":                          true,
+		"stop":                         true,
 		"policy.bucket":                "x",
 	}, "rule")
 	if err != nil {
@@ -228,7 +246,6 @@ func TestNormalizeReturnSuspicion(t *testing.T) {
 		t.Fatalf("vars missing")
 	}
 }
-
 
 func TestRuleUnknownTopLevelKey(t *testing.T) {
 	// Manually inject unknown key by decoding YAML snippet.
