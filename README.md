@@ -256,6 +256,46 @@ spoe-group decide_response
     messages decide_response
 ```
 
+#### Capturing JA3 fingerprints (HAProxy 2.5+)
+
+Decision only needs a string or hash called `ja3` in the SPOE payload; HAProxy 2.5+ can derive it directly from the TLS ClientHello. The pattern below works on 2.5–2.9 (community or Enterprise) without Lua/SPOE filters:
+
+```haproxy
+global
+    tune.ssl.capture-buffer-size 128   # capture enough of the ClientHello
+
+frontend public_www
+    bind :443 ssl crt /etc/pki/tls/private/site.pem
+    acl has_tls ssl_fc
+
+    # Build canonical JA3 string: version,ciphers,extensions,elliptic_curves,ec_point_formats
+    http-request set-var-fmt(txn.ja3_raw) "%[ssl_fc_protocol_hello_id],%[ssl_fc_cipherlist_bin(1),be2dec(-,2)],%[ssl_fc_extlist_bin(1),be2dec(-,2)],%[ssl_fc_eclist_bin(1),be2dec(-,2)],%[ssl_fc_ecformats_bin,be2dec(-,1)]" if has_tls
+
+    # Hash (MD5) then hex -> standard JA3 fingerprint text
+    http-request set-var(txn.ja3) %[var(txn.ja3_raw),digest(md5),hex] if has_tls
+
+    # Optional: surface it to backends/logs
+    http-request set-header X-JA3 %[var(txn.ja3_raw)] if has_tls
+    http-request set-header X-JA3-Hash %[var(txn.ja3)] if has_tls
+    http-request capture var(txn.ja3) len 32 if has_tls
+```
+
+Key points:
+
+- `tune.ssl.capture-buffer-size` must be non-zero (≥96 bytes recommended) or the `ssl_fc_*` fetches stay empty.
+- Guard the rules with `ssl_fc` so plaintext HTTP traffic skips them.
+- Always wrap the hash line in `%[ ... ]`; without it the `digest(md5),hex` converters are ignored.
+
+Once the transaction variable exists, include it in the request SPOE message:
+
+```haproxy
+spoe-message decide_request
+    args ... \
+         ja3=var(txn.ja3)
+```
+
+Leaving the arg in place is harmless when the value is empty (e.g., for HTTP health checks). Decision logs the hash under `ja3=` in `--debug` output, so you can confirm the capture end-to-end with `journalctl -u decision-spoa.service -f`.
+
 ### SPOE Inputs and Outputs
 
 The tables below list the request/response variables exchanged between HAProxy and Decision.
@@ -272,7 +312,7 @@ The tables below list the request/response variables exchanged between HAProxy a
 | `method` | Yes | `method` | `match.method` comparisons |
 | `query` | Yes | `query` (raw string, no `?`) | Regex on query params |
 | `ssl_sni` | Optional | `ssl_fc_sni` | SNI matches (if TLS info available) |
-| `ja3` | Optional | `ssl_fc_ja3_hash` (HAProxy ≥2.5) | JA3/TLS fingerprint matching |
+| `ja3` | Optional | `ssl_fc_ja3_hash` or manual `ssl_fc_*` build (HAProxy ≥2.5) | JA3/TLS fingerprint matching |
 | `frontend` / `backend` | Yes | Vars set by HAProxy (`set-var(txn.decision_frontend/backend)`) | Scope defaults/rules, Prom labels |
 | `req_cookies` | Optional | `hdr(cookie)` | Session fallback (UA+IP vs cookies) |
 | `cookieguard_valid` | Optional | `var(txn.cookieguard.valid)` | Whether hb_v2/hb_v3 verified |
@@ -517,7 +557,7 @@ Examples
     return:
       reason: has-token
   ```
-- Constrain by JA3 and SNI (requires passing `ja3` and `ssl_sni` in the SPOE message):
+- Constrain by JA3 and SNI (requires passing `ja3` (see “Capturing JA3 fingerprints”) and `ssl_sni` in the SPOE message):
   ```yaml
   - name: tls-fingerprint
     match:
@@ -690,7 +730,7 @@ The table below lists every key supported inside a `rules:` entry. Unless stated
 | `xff` | list of regex | Regular expressions matched against the full `X-Forwarded-For` header received from HAProxy. |
 | `user_agent` | list of regex | Regular expressions evaluated against the `User-Agent` header. |
 | `sni` | list of regex | Regular expressions evaluated against the TLS SNI (requires HAProxy to forward `ssl_fc_sni`). |
-| `ja3` | list of regex | Regular expressions evaluated against the JA3 hash (requires `ssl_fc_ja3_hash`). |
+| `ja3` | list of regex | Regular expressions evaluated against the JA3 hash (requires HAProxy to forward `ja3` via SPOE; see “Capturing JA3 fingerprints”). |
 | `country` | list of string | ISO 3166-1 alpha-2 country codes compared against the GeoIP lookup result. |
 | `asn` | list of uint | ASN numbers compared against the GeoIP lookup result. |
 | `cidr` | list of CIDR strings | IPv4/IPv6 ranges checked against the client IP after trusted-proxy stripping. |
@@ -714,7 +754,7 @@ Because later merges overwrite earlier values, backend-specific defaults win ove
 - All match lists are OR-ed. `host` entries default to exact matches unless you include regex tokens (`^`, `*`, `[]`, etc.); `path`, `xff`, `user_agent`, `query`, `sni`, and `ja3` entries are compiled as Go regular expressions.
 - `method` comparisons are case-insensitive exact matches (e.g., `GET`, `POST`).
 - `sni` and `ja3` clauses are optional—include them only if your HAProxy build exports those fields via SPOE.
-- JA3 fingerprints require HAProxy 2.5+ (community builds added `ssl_fc_ja3_hash` in that release). JA4 still needs 2.9+ or an external TLS terminator that forwards the hash. Builds ≤2.4 cannot expose the client hello to SPOE, so leave those matchers out there.
+- JA3 fingerprints require HAProxy 2.5+ (that release exposed the `ssl_fc_*` fetches used in the example above, plus the optional `ssl_fc_ja3_hash`). JA4 still needs 2.9+ or an external TLS terminator that forwards the hash. Builds ≤2.4 cannot expose the client hello to SPOE, so leave those matchers out there.
 - `country` expects ISO alpha-2 codes. `asn` takes unsigned integers. `cidr` supports IPv4/IPv6 ranges in CIDR notation.
 - Scope filters (`frontends`, `backends`, `protocols`) constrain where the rule can run. Omit the field to allow every value. Protocol names are lower-cased strings; `http` is assumed if none are supplied.
 - `return` is an arbitrary key/value map. Nothing is reserved—emit whichever variables you intend to consume in HAProxy (e.g., `policy.bucket`, `policy.challenge`, custom flags), and gate behaviour there with `var()` checks.
