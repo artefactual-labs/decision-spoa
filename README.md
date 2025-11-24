@@ -702,6 +702,114 @@ The "special" table holds durable trust profiles keyed by a privacy‑safe diges
   - `decision_trust_hint_total{hint="role=<value>"}` counts role assignments.
   - With `--debug-verbose`, logs include `special={role=… idle=… groups=…}` on the same line as the request summary.
 
+- AtoM authenticated cookie (field example)
+  - Context: AtoM sets `atom_authenticated=1` only after login. The value is a constant flag, not a per-user session ID.
+  - Example context file (default path `/etc/decision-policy/context.yml` when deployed via ansible-haproxy-decision):
+
+    ```yaml
+    # Managed by ansible-haproxy-decision
+    response:
+      mode: allowlist
+      headers: []
+      cookies:
+        - name: atom_authenticated
+          table: special
+          tags:
+            session.role: authenticated
+    hash:
+      mode: hmac-sha256
+      secret_file: secrets/edge_hmac.key
+    ```
+  - Why a special table exists: it keeps durable “trusted hints” (roles/groups) separate from the short-lived public counters, so you can grant grace/bypass challenges to known users without tying that trust to a single IP.
+  - Flow, end to end:
+    1) Response: HAProxy forwards the login response to Decision; the agent HMACs `atom_authenticated=1`, creates/updates one special entry keyed by the digest, and stamps `session.role=authenticated`.
+    2) Later requests: when the browser sends the cookie, Decision hashes it again, “touches” the same entry, and exposes `session.special.role` + `session.special.idle_seconds` to policy and HAProxy vars.
+    3) Policy/routing: rules (or HAProxy ACLs) can skip challenges when `session_special.role: ["authenticated"]` is present; public counters still track volume/suspicion.
+  - Persistence & eviction:
+    - Special table: pure LRU, `--session-special-max` (default 50,000), no idle timeout. A constant value collapses all authenticated users into one digest; that entry will not fall out unless the table is flooded with many distinct digests, the process restarts, or the HMAC secret changes.
+    - Public table: also LRU-only, capped by `--session-public-max` (default 200,000). Evicting the public entry does not delete the special profile—trusted role still applies.
+  - Practical impact for editors sitting 20+ minutes on a form: the special role survives inactivity; they won’t suddenly see a challenge because of idle time. Only restarts/secret rotation/extreme cardinality could clear it.
+  - If you need per-user granularity instead of a shared role: have AtoM emit a per-session value (or add a second cookie/header) and keep `hash_mode: hmac-sha256` so each session creates its own digest and special entry.
+
+- Roaming 5G / IP-change example (AtoM)
+  - Why this example: 5G/CGNAT users change IPs often, stress-testing how public sessions (LRU, IP-bound) and special sessions (HMAC-keyed, durable) interact. It also shows how logout signals clear roles, how Cookie-Guard reissues tokens silently, and why response-sourced auth flags can’t be forged.
+  - Context file (per-user key + auth flag, logout-safe, roaming-friendly):
+
+    ```yaml
+    # Managed by ansible-haproxy-decision
+    response:
+      mode: allowlist
+      headers: []
+      cookies:
+        - name: symfony        # real per-user session cookie → per-user special key
+          table: special
+          hash_mode: hmac-sha256
+        - name: atom_authenticated  # auth flag set only on login
+          table: special
+          hash_mode: hmac-sha256
+          tags:
+            session.role: authenticated   # role only while this cookie is present
+    hash:
+      mode: hmac-sha256
+      secret_file: secrets/edge_hmac.key
+    ```
+
+  - Policy options:
+    - **Roaming-friendly (zero friction):** skip challenges whenever the authenticated role is present.
+    - **Stricter:** also require `cookieguard.valid=true` (keeps bot check tied to current IP).
+
+    ```yaml
+    rules:
+      - name: authenticated-grace
+        match:
+          session_special:
+            role: [authenticated]
+        return:
+          use_challenge: false
+          reason: authenticated
+
+      - name: fallback
+        fallback: true
+        return:
+          use_challenge: true
+          reason: default-policy
+    ```
+
+    To enforce the stricter mode, add the `cookie_guard.valid: true` matcher back into `authenticated-grace`.
+
+  - Step by step (why logout and roaming both work):
+    1) Login response: AtoM sets `atom_authenticated=1`. Decision HMACs it, updates the special entry keyed by the HMAC of `symfony`, and tags `session.role=authenticated`.
+    2) Normal requests: Browser sends both cookies; Decision “touches” the same special entry (keyed by `symfony`) so the role stays visible.
+    3) Logout: `atom_authenticated` disappears. Requests still touch the `symfony` key, but no role tag is applied, so `session.special.role` clears immediately; policy falls back and challenges can resume.
+    4) 5G IP hop: Cookie-Guard marks hb_v2 invalid (`cookieguard.valid=false`), and Decision starts a new public entry for the new IP. The special entry still resolves via `symfony`, so the role is present; with the roaming-friendly policy, `use_challenge=false`, HAProxy issues a fresh hb_v2 silently, and the user isn’t interrupted. With the stricter policy, the first request will redirect to /altcha to refresh hb_v2, then proceed challenge-free.
+    5) Forge resistance: Attackers can’t mint this role because the special key is derived from the per-user `symfony` cookie HMAC; the auth flag only tags the existing per-user key while it is present.
+    6) Why a forged `atom_authenticated=1` header/cookie from the client doesn’t grant the role: the role tag is applied only on the **response path** (`decide_response` SPOE) when AtoM itself sets the cookie. Client-side injection on requests never triggers tag application; it merely “touches” an existing key. Without the AtoM-issued response signal, no role is added.
+  - What “HMAC entries” in the special table means:
+    - Each special entry key is the HMAC of the allowed signal’s value (`symfony` or `atom_authenticated`) using the secret from `hash.secret_file`. The raw cookie values are never stored.
+    - Multiple users each have a distinct `symfony` HMAC → separate special entries; `atom_authenticated` just tags the matching per-user entry when AtoM emits it.
+    - Rotating the secret invalidates all existing digests; entries are rebuilt on the next legitimate responses.
+  - HAProxy snippet for silent hb_v2 reissue when Decision says “no challenge”:
+
+    ```haproxy
+    # in backend atom (after decision SPOE)
+    acl need_challenge var(txn.decision.use_challenge) -m str -i true
+    acl cookie_ok     var(txn.cookieguard.valid) -m str 1
+
+    # Redirect only when Decision wants a challenge and the cookie is invalid
+    http-request redirect code 302 location /altcha?url=%[url] if !cookie_ok need_challenge
+
+    # Otherwise, issue a fresh hb_v2 silently
+    http-request send-spoe-group cookie-guard issue-token if !cookie_ok !need_challenge
+    acl new_token var(txn.cookieguard.token) -m found
+    http-response add-header Set-Cookie "hb_v2=%[var(txn.cookieguard.token)]; Max-Age=%[var(txn.cookieguard.max_age)]; Path=/; HttpOnly; Secure; SameSite=Lax" if !need_challenge !{ var(txn.has_cookie) -m bool } new_token
+    ```
+
+  - Why this is a good stress test:
+    - 5G/CGNAT links churn IPs frequently; without the special table you’d lose trusted state on every hop.
+    - It shows public vs special separation: the public LRU starts a fresh entry per IP change, but the special entry persists, proving durability of trusted hints.
+    - It exercises the Cookie-Guard IP binding: even with a valid role, the policy can insist on a fresh, IP-bound token to keep bot protection intact.
+    - With per-session `symfony` values, special-table cardinality grows per user, but the LRU cap (`--session-special-max` default 50k) and zero evictions (see metrics) confirm plenty of headroom.
+
 Tip: keep the response SPOE only in backends to avoid double‑processing `res.hdrs`. Place it after any `http-response add-header`/`set-header` that synthesizes signals for Decision.
 
 ### Rule reference
